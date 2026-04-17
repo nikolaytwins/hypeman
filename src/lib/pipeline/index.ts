@@ -1,0 +1,10 @@
+export { generateScript } from "@/lib/pipeline/generateScript";
+export { adaptScript } from "@/lib/pipeline/adaptScript";
+export { generateVoice } from "@/lib/pipeline/generateVoice";
+export { mergeVideos } from "@/lib/pipeline/mergeVideos";
+export { addAudio } from "@/lib/pipeline/addAudio";
+export { generateSubtitles, transcribeToText } from "@/lib/pipeline/generateSubtitles";
+export { burnSubtitles } from "@/lib/pipeline/burnSubtitles";
+export { extractAudioFromVideo } from "@/lib/pipeline/extractAudio";
+export type { ScriptPayload, Scene } from "@/lib/pipeline/types";
+export { parseScriptJson, scriptToPlainText } from "@/lib/pipeline/types";
