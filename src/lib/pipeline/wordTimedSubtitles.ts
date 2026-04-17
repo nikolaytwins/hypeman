@@ -153,6 +153,49 @@ function getOpenAI(): OpenAI {
   return new OpenAI({ apiKey: key, baseURL: process.env.OPENAI_BASE_URL });
 }
 
+/** Локальный faster-whisper (Python FastAPI). Нужен `WHISPER_SERVICE_URL` и запущенный `npm run whisper`. */
+async function transcribeWithLocalWhisper(
+  audioFilePath: string,
+  baseUrl: string,
+): Promise<TimedWord[]> {
+  const root = baseUrl.replace(/\/$/, "");
+  const resolved = path.resolve(audioFilePath);
+  const language = process.env.WHISPER_LANGUAGE?.trim() || "ru";
+  const response = await fetch(`${root}/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ audio_path: resolved, language }),
+  });
+  if (!response.ok) {
+    const t = await response.text().catch(() => "");
+    throw new Error(`Whisper service error: ${response.status} ${t.slice(0, 400)}`);
+  }
+  const data = (await response.json()) as {
+    words?: Array<{ word?: string; start?: number; end?: number }>;
+  };
+  const words = data.words;
+  if (!Array.isArray(words) || !words.length) {
+    throw new Error("Локальный Whisper не вернул words[]");
+  }
+  const out: TimedWord[] = [];
+  for (const w of words) {
+    const word = String(w.word ?? "").trim();
+    const start = Number(w.start);
+    const end = Number(w.end);
+    if (!word || !Number.isFinite(start) || !Number.isFinite(end)) continue;
+    out.push({ word, start, end });
+  }
+  if (!out.length) throw new Error("пустой words после локального Whisper");
+  log.info("local_whisper_words", { count: out.length });
+  return out;
+}
+
+function whisperServiceBaseUrl(): string | null {
+  const u = process.env.WHISPER_SERVICE_URL?.trim();
+  if (u) return u.replace(/\/$/, "");
+  return null;
+}
+
 /** Словарные таймкоды OpenAI Whisper (лучший синк с дорожкой). */
 export async function transcribeWordsOpenAI(audioPath: string): Promise<TimedWord[]> {
   const openai = getOpenAI();
@@ -310,22 +353,34 @@ export function segmentsToSrt(segments: JsonSeg[], maxChars = 34): string {
     .join("\n");
 }
 
-/** Пайплайн: OpenAI words → SRT; иначе OpenRouter JSON → SRT; иначе throw (вызывающий сделает fallback). */
+/** Пайплайн: локальный faster-whisper (если WHISPER_SERVICE_URL) → иначе OpenAI words → SRT; иначе OpenRouter JSON → SRT; иначе throw (вызывающий сделает fallback). */
 export async function buildSyncedSrtFromAudio(audioPath: string): Promise<string> {
   const lineMax = parseSubtitleEnvInt("SUBTITLE_LINE_MAX_CHARS", 34);
   const cueMaxSec = parseSubtitleEnvFloat("SUBTITLE_CUE_MAX_SEC", 4.2);
   const pauseFlush = parseSubtitleEnvFloat("SUBTITLE_PAUSE_FLUSH_SEC", 0.42);
   const cueGap = parseSubtitleEnvFloat("SUBTITLE_GAP_BETWEEN_CUES_SEC", 0.04);
 
+  const wordSrtOpts = {
+    maxChars: lineMax,
+    maxDurSec: cueMaxSec,
+    pauseFlushSec: pauseFlush,
+    gapBetweenCuesSec: cueGap,
+  };
+
+  const localBase = whisperServiceBaseUrl();
+  if (localBase) {
+    try {
+      const words = await transcribeWithLocalWhisper(audioPath, localBase);
+      return wordsToSrt(words, wordSrtOpts);
+    } catch (e) {
+      log.warn("local_whisper_failed", { message: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
   if (process.env.OPENAI_API_KEY?.trim()) {
     try {
       const words = await transcribeWordsOpenAI(audioPath);
-      return wordsToSrt(words, {
-        maxChars: lineMax,
-        maxDurSec: cueMaxSec,
-        pauseFlushSec: pauseFlush,
-        gapBetweenCuesSec: cueGap,
-      });
+      return wordsToSrt(words, wordSrtOpts);
     } catch (e) {
       log.warn("openai_words_failed", { message: e instanceof Error ? e.message : String(e) });
     }

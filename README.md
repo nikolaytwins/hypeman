@@ -18,6 +18,28 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
+## Whisper Service (локальный faster-whisper)
+
+Субтитры со словесными таймкодами могут идти через **Python-микросервис** (`whisper_service.py`, FastAPI + faster-whisper), а не через OpenAI Whisper API.
+
+**Установка:**
+
+```bash
+pip install -r requirements_whisper.txt
+```
+
+**Запуск** (держать запущенным рядом с Next.js, на той же машине, где лежат файлы `jobId` — сервис читает `audio_path` с диска):
+
+```bash
+python whisper_service.py
+# или из корня репозитория:
+npm run whisper
+```
+
+В `.env` приложения задайте **`WHISPER_SERVICE_URL`** (например `http://127.0.0.1:8001` на VPS вместе с Node). Пока URL задан, пайплайн сначала обращается к этому сервису; при ошибке можно откатиться на OpenAI, если задан `OPENAI_API_KEY`. Опционально: **`WHISPER_LANGUAGE`** (по умолчанию `ru`).
+
+На прод-сервере (например отдельный VPS) поднимите процесс так же (systemd/supervisor: два юнита — Next и whisper), чтобы пути к аудио в `storage` совпадали с теми, что передаёт Node в теле запроса.
+
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
 ## Learn More

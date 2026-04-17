@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "whisper": "python whisper_service.py"
   },
   "dependencies": {
     "@fontsource/bebas-neue": "^5.2.7",
