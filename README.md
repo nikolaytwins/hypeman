@@ -36,9 +36,11 @@ python whisper_service.py
 npm run whisper
 ```
 
-В `.env` приложения задайте **`WHISPER_SERVICE_URL`** (например `http://127.0.0.1:8001` на VPS вместе с Node). Пока URL задан, пайплайн сначала обращается к этому сервису; при ошибке можно откатиться на OpenAI, если задан `OPENAI_API_KEY`. Опционально: **`WHISPER_LANGUAGE`** (по умолчанию `ru`).
+В `.env` / **`.env.production`** задайте **`WHISPER_SERVICE_URL`** (например `http://127.0.0.1:8001`). Пока URL задан, пайплайн сначала обращается к этому сервису; при ошибке можно откатиться на OpenAI (`OPENAI_API_KEY`) или OpenRouter. Опционально: **`WHISPER_LANGUAGE`** (по умолчанию `ru`).
 
-На прод-сервере (например отдельный VPS) поднимите процесс так же (systemd/supervisor: два юнита — Next и whisper), чтобы пути к аудио в `storage` совпадали с теми, что передаёт Node в теле запроса.
+**PM2:** после правки `.env.production` выполните `pm2 reload hypeman --update-env`. Если переменная не попадает в процесс Node, продублируйте её в блок `env` приложения `hypeman` в `ecosystem.config.cjs` (рядом с `PORT`).
+
+На прод-сервере поднимите whisper рядом с Next (два процесса), чтобы пути к аудио в `storage` совпадали с теми, что передаёт Node в теле запроса.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 

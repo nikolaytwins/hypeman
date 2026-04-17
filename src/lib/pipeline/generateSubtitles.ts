@@ -8,13 +8,20 @@ import {
   shouldUseOpenRouterTranscription,
   transcribeWithOpenRouter,
 } from "@/lib/openrouter/audioTranscribe";
-import { buildSyncedSrtFromAudio } from "@/lib/pipeline/wordTimedSubtitles";
+import {
+  buildSyncedSrtFromAudio,
+  isLocalWhisperServiceConfigured,
+} from "@/lib/pipeline/wordTimedSubtitles";
 
 const log = createLogger("generate_subtitles");
 
 function getOpenAI(): OpenAI {
   const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error("Не задан OPENAI_API_KEY (нужен для Whisper / субтитров)");
+  if (!key) {
+    throw new Error(
+      "Не задан OPENAI_API_KEY. Для субтитров без OpenAI задайте WHISPER_SERVICE_URL и держите запущенным whisper_service (см. README), либо OPENROUTER_API_KEY.",
+    );
+  }
   return new OpenAI({
     apiKey: key,
     baseURL: process.env.OPENAI_BASE_URL,
@@ -61,6 +68,12 @@ export async function generateSubtitles(
     await fs.writeFile(srtPath, srt, "utf8");
     log.info("saved", { srtPath, bytes: Buffer.byteLength(srt, "utf8") });
     return srtPath;
+  }
+
+  if (isLocalWhisperServiceConfigured()) {
+    throw new Error(
+      "Задан WHISPER_SERVICE_URL, но субтитры со словами не получились (сервис недоступен, ошибка или пустой ответ), а OPENROUTER_API_KEY не настроен. Проверьте: `pm2 logs hypeman-whisper`, путь к аудио на диске, после правки .env — `pm2 reload hypeman --update-env`, чтобы Next видел WHISPER_SERVICE_URL.",
+    );
   }
 
   log.info("whisper", { audioPath });

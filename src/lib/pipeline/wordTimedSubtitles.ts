@@ -196,6 +196,11 @@ function whisperServiceBaseUrl(): string | null {
   return null;
 }
 
+/** Локальный faster-whisper: в .env процесса Node должен быть WHISPER_SERVICE_URL (после правок — `pm2 reload hypeman --update-env`). */
+export function isLocalWhisperServiceConfigured(): boolean {
+  return Boolean(process.env.WHISPER_SERVICE_URL?.trim());
+}
+
 /** Словарные таймкоды OpenAI Whisper (лучший синк с дорожкой). */
 export async function transcribeWordsOpenAI(audioPath: string): Promise<TimedWord[]> {
   const openai = getOpenAI();
