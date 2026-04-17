@@ -1,0 +1,59 @@
+# Деплой на Selectel: сборка на runner (не нагружает VPS), на сервер — только rsync + PM2.
+name: Deploy to Selectel
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-selectel
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install & build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Prepare standalone bundle
+        run: bash scripts/prepare-standalone-deploy.sh
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+          SSH_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          printf 'Host deploy-target\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking yes\n' "$SSH_HOST" "$SSH_USER" >> ~/.ssh/config
+
+      - name: Rsync application
+        env:
+          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: rsync -az --delete -e ssh release/ "deploy-target:/mnt/data/hypeman/current/"
+
+      - name: Link production env (вне rsync — не затирается)
+        run: |
+          ssh deploy-target 'test -f /mnt/data/hypeman/.env.production && ln -sf /mnt/data/hypeman/.env.production /mnt/data/hypeman/current/.env.production || true'
+
+      - name: Rsync PM2 config
+        run: scp infra/ecosystem.config.cjs "deploy-target:/mnt/data/hypeman/ecosystem.config.cjs"
+
+      - name: PM2 reload
+        run: |
+          ssh deploy-target 'mkdir -p /mnt/data/hypeman/current/storage/{input,audio,scenes,output}'
+          ssh deploy-target 'cd /mnt/data/hypeman && (pm2 describe hypeman >/dev/null 2>&1 && pm2 reload ecosystem.config.cjs --only hypeman --update-env || pm2 start ecosystem.config.cjs) && pm2 save'
