@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createLogger } from "@/lib/logger";
-import { escapeForSubtitlesFilter, runFfmpeg } from "@/lib/ffmpeg/exec";
+import { escapeForSubtitlesFilter, prependHdrToSdrToVideoFilterChain, runFfmpeg } from "@/lib/ffmpeg/exec";
 import { jobOutputDir, resolvedSubtitleFontSetup } from "@/lib/paths";
 
 const log = createLogger("burn_subtitles");
@@ -30,10 +30,11 @@ export async function burnSubtitles(
     "MarginV=56",
     "Bold=1",
   ].join(",");
-  const vf =
+  const subVf =
     fd.length > 0
       ? `subtitles='${sub}':fontsdir='${fd}':force_style='${style}'`
       : `subtitles='${sub}':force_style='${style}'`;
+  const vf = prependHdrToSdrToVideoFilterChain(subVf);
 
   log.info("subtitle_font", { fontname: fn, fontsdir: fd || null });
 

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createLogger } from "@/lib/logger";
-import { runFfmpeg } from "@/lib/ffmpeg/exec";
+import { FFMPEG_HDR_TO_SDR_ZSCALE, runFfmpeg } from "@/lib/ffmpeg/exec";
 import { jobOutputDir, jobScenesDir } from "@/lib/paths";
 
 const log = createLogger("merge_videos");
@@ -22,7 +22,7 @@ async function normalizeScene(
   index: number,
   durationHintSec?: number,
 ): Promise<void> {
-  const vf = [
+  const scalePad = [
     `scale=${TARGET_W}:${TARGET_H}:force_original_aspect_ratio=decrease`,
     `pad=${TARGET_W}:${TARGET_H}:(ow-iw)/2:(oh-ih)/2`,
     "setsar=1",
@@ -40,7 +40,7 @@ async function normalizeScene(
         String(sec),
         "-an",
         "-vf",
-        vf,
+        scalePad,
         "-c:v",
         "libx264",
         "-preset",
@@ -57,13 +57,14 @@ async function normalizeScene(
     return;
   }
 
+  const vfVideo = [FFMPEG_HDR_TO_SDR_ZSCALE, scalePad].join(",");
   await runFfmpeg(
     [
       "-i",
       inputPath,
       "-an",
       "-vf",
-      vf,
+      vfVideo,
       "-c:v",
       "libx264",
       "-preset",
