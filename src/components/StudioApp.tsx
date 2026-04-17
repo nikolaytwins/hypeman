@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { nanoid } from "nanoid";
 import {
@@ -24,6 +24,7 @@ import {
   Combine,
   PartyPopper,
   ScrollText,
+  History,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -46,21 +47,23 @@ import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
 import type { ScriptPayload } from "@/lib/pipeline/types";
+import type { ReelListItem } from "@/lib/studioSession";
+import {
+  STUDIO_DRAFT_KEY,
+  clearStudioDraft,
+  draftHasWork,
+  isValidJobId,
+  setLastReelJobId,
+  snapshotFromDraft,
+  type Origin,
+  type Screen,
+  type StudioDraftV1,
+  type StudioStateSnapshot,
+} from "@/lib/studioSession";
 import { cn } from "@/lib/utils";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type LogEntry = { t: string; level: "info" | "error"; msg: string };
-type Origin = "new" | "adapt";
-type Screen =
-  | "pick"
-  | "new_topic"
-  | "new_script"
-  | "adapt_upload"
-  | "adapt_transcribe"
-  | "adapt_rewrite"
-  | "voice"
-  | "scenes"
-  | "render"
-  | "done";
 
 const ERR_REQUEST = "Ошибка запроса";
 const ERR_UPLOAD = "Ошибка загрузки";
@@ -71,6 +74,10 @@ function formatTime() {
     minute: "2-digit",
     second: "2-digit",
   });
+}
+
+function formatReelDate(ms: number) {
+  return new Date(ms).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
 }
 
 function StepHeader({
@@ -109,8 +116,17 @@ export function StudioApp() {
   const [errOpen, setErrOpen] = useState(false);
   const [errMsg, setErrMsg] = useState("");
   const [renderProgress, setRenderProgress] = useState(0);
+  /** Пока false — не пишем в localStorage, чтобы не затереть черновик до восстановления. */
+  const [studioHydrated, setStudioHydrated] = useState(false);
   const scenesInputRef = useRef<HTMLInputElement>(null);
   const sourceInputRef = useRef<HTMLInputElement>(null);
+
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const reelFromUrl = searchParams.get("reel") ?? "";
+
+  const [reels, setReels] = useState<ReelListItem[]>([]);
+  const [reelsLoading, setReelsLoading] = useState(false);
 
   const pushLog = useCallback((msg: string, level: LogEntry["level"] = "info") => {
     setLogs((prev) => [...prev.slice(-60), { t: formatTime(), level, msg }]);
@@ -126,7 +142,163 @@ export function StudioApp() {
     [pushLog],
   );
 
+  const applySnapshot = useCallback((snap: StudioStateSnapshot) => {
+    setJobId(snap.jobId);
+    setOrigin(snap.origin);
+    setScreen(snap.screen);
+    setTopic(snap.topic);
+    setScript(snap.script);
+    setTranscript(snap.transcript);
+    setSceneFileNames(snap.sceneFileNames);
+    setSourceReady(snap.sourceReady);
+    setRenderProgress(snap.renderProgress);
+  }, []);
+
+  const openReelByJobId = useCallback(
+    async (id: string) => {
+      if (!isValidJobId(id)) return;
+      try {
+        const res = await fetch(`/api/reels/${encodeURIComponent(id)}/session`);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
+        const snap = snapshotFromDraft(data.draft as StudioDraftV1);
+        if (!snap) throw new Error("Не удалось разобрать сессию");
+        applySnapshot(snap);
+        router.replace(`/?reel=${encodeURIComponent(id)}`, { scroll: false });
+        pushLog("Рилс открыт — можно править и продолжать");
+      } catch (e) {
+        fail(e);
+      }
+    },
+    [applySnapshot, fail, pushLog, router],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (reelFromUrl && isValidJobId(reelFromUrl)) {
+          const res = await fetch(`/api/reels/${encodeURIComponent(reelFromUrl)}/session`);
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error ?? "нет сессии");
+          const snap = snapshotFromDraft(data.draft as StudioDraftV1);
+          if (snap && !cancelled) {
+            applySnapshot(snap);
+            pushLog("Загружена сессия с сервера");
+          }
+        } else {
+          const raw = localStorage.getItem(STUDIO_DRAFT_KEY);
+          if (raw) {
+            const d = JSON.parse(raw) as Partial<StudioDraftV1>;
+            const snap = snapshotFromDraft(d);
+            if (snap && !cancelled) {
+              applySnapshot(snap);
+              pushLog("Черновик восстановлен — продолжайте с того же шага");
+            }
+          }
+        }
+      } catch {
+        try {
+          const raw = localStorage.getItem(STUDIO_DRAFT_KEY);
+          if (raw) {
+            const d = JSON.parse(raw) as Partial<StudioDraftV1>;
+            const snap = snapshotFromDraft(d);
+            if (snap && !cancelled) {
+              applySnapshot(snap);
+              pushLog("Черновик из браузера (сессия по ссылке недоступна)");
+            }
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!cancelled) setStudioHydrated(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [reelFromUrl, applySnapshot, pushLog]);
+
+  useEffect(() => {
+    if (screen !== "pick") return;
+    let cancelled = false;
+    (async () => {
+      setReelsLoading(true);
+      try {
+        const r = await fetch("/api/reels");
+        const d = await r.json();
+        if (!cancelled && r.ok && Array.isArray(d.reels)) setReels(d.reels);
+      } finally {
+        if (!cancelled) setReelsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [screen]);
+
+  useEffect(() => {
+    if (!studioHydrated) return;
+    if (screen === "done") {
+      clearStudioDraft();
+    }
+    const persist =
+      screen === "done" ||
+      draftHasWork({
+        screen,
+        script,
+        topic,
+        transcript,
+        sceneFileNames,
+        sourceReady,
+      });
+    if (!persist) return;
+
+    const t = window.setTimeout(() => {
+      try {
+        const draft: StudioDraftV1 = {
+          v: 1,
+          savedAt: Date.now(),
+          jobId,
+          origin,
+          screen,
+          topic,
+          script,
+          transcript,
+          sceneFileNames,
+          sourceReady,
+          renderProgress,
+        };
+        if (screen !== "done") {
+          localStorage.setItem(STUDIO_DRAFT_KEY, JSON.stringify(draft));
+        }
+        setLastReelJobId(jobId);
+        void fetch(`/api/reels/${encodeURIComponent(jobId)}/session`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(draft),
+        }).catch(() => {});
+      } catch {
+        /* ignore */
+      }
+    }, 450);
+    return () => window.clearTimeout(t);
+  }, [
+    studioHydrated,
+    jobId,
+    origin,
+    screen,
+    topic,
+    script,
+    transcript,
+    sceneFileNames,
+    sourceReady,
+    renderProgress,
+  ]);
+
   const resetAll = () => {
+    clearStudioDraft();
+    router.replace("/", { scroll: false });
     setJobId(nanoid(10));
     setOrigin(null);
     setScreen("pick");
@@ -460,6 +632,8 @@ export function StudioApp() {
           </h1>
           <p className="max-w-xl text-sm leading-relaxed text-slate-600">
             Один шаг на экране: сценарий с ИИ, озвучка, ffmpeg и субтитры — в светлых карточках без лишнего шума.
+            Сессия каждого рилса пишется на сервер (можно вернуться позже), плюс черновик в этом браузере. Прямая
+            ссылка: <span className="font-mono text-xs">?reel=ваш-jobId</span>.
           </p>
         </header>
 
@@ -493,70 +667,125 @@ export function StudioApp() {
               transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
             >
               {screen === "pick" ? (
-                <Card>
-                  <CardHeader>
-                    <StepHeader
-                      icon={LayoutGrid}
-                      title="Что делаем?"
-                      description="Выберите поток — дальше по одному шагу в фокусе."
-                    />
-                  </CardHeader>
-                  <CardContent className="grid gap-4 sm:grid-cols-2">
-                    <motion.div whileHover={{ y: -2 }} transition={{ duration: 0.2 }}>
-                      <Button
-                        variant="secondary"
-                        className="h-full min-h-[140px] w-full flex-col items-stretch justify-between gap-4 rounded-xl border border-slate-200/90 bg-white/70 p-5 text-left shadow-sm backdrop-blur-xl transition hover:border-violet-200 hover:shadow-[0_16px_40px_-16px_rgba(124,58,237,0.2)]"
-                        onClick={() => {
-                          setOrigin("new");
-                          setScript(null);
-                          setTranscript("");
-                          setSceneFileNames([]);
-                          setSourceReady(false);
-                          setTopic("");
-                          setRenderProgress(0);
-                          setScreen("new_topic");
-                        }}
-                      >
-                        <Clapperboard className="h-6 w-6 text-violet-600" />
-                        <span>
-                          <span className="block text-base font-medium tracking-tight text-slate-900">
-                            Новый ролик
+                <>
+                  <Card>
+                    <CardHeader>
+                      <StepHeader
+                        icon={LayoutGrid}
+                        title="Что делаем?"
+                        description="Выберите поток — дальше по одному шагу в фокусе."
+                      />
+                    </CardHeader>
+                    <CardContent className="grid gap-4 sm:grid-cols-2">
+                      <motion.div whileHover={{ y: -2 }} transition={{ duration: 0.2 }}>
+                        <Button
+                          variant="secondary"
+                          className="h-full min-h-[140px] w-full flex-col items-stretch justify-between gap-4 rounded-xl border border-slate-200/90 bg-white/70 p-5 text-left shadow-sm backdrop-blur-xl transition hover:border-violet-200 hover:shadow-[0_16px_40px_-16px_rgba(124,58,237,0.2)]"
+                          onClick={() => {
+                            router.replace("/", { scroll: false });
+                            setJobId(nanoid(10));
+                            setOrigin("new");
+                            setScript(null);
+                            setTranscript("");
+                            setSceneFileNames([]);
+                            setSourceReady(false);
+                            setTopic("");
+                            setRenderProgress(0);
+                            setScreen("new_topic");
+                          }}
+                        >
+                          <Clapperboard className="h-6 w-6 text-violet-600" />
+                          <span>
+                            <span className="block text-base font-medium tracking-tight text-slate-900">
+                              Новый ролик
+                            </span>
+                            <span className="mt-1 block text-xs font-normal text-slate-500">
+                              Тема → сценарий → озвучка → сцены → финал
+                            </span>
                           </span>
-                          <span className="mt-1 block text-xs font-normal text-slate-500">
-                            Тема → сценарий → озвучка → сцены → финал
+                          <ChevronRight className="ml-auto h-4 w-4 text-slate-400" />
+                        </Button>
+                      </motion.div>
+                      <motion.div whileHover={{ y: -2 }} transition={{ duration: 0.2 }}>
+                        <Button
+                          variant="secondary"
+                          className="h-full min-h-[140px] w-full flex-col items-stretch justify-between gap-4 rounded-xl border border-slate-200/90 bg-white/70 p-5 text-left shadow-sm backdrop-blur-xl transition hover:border-fuchsia-200 hover:shadow-[0_16px_40px_-16px_rgba(192,38,211,0.18)]"
+                          onClick={() => {
+                            router.replace("/", { scroll: false });
+                            setJobId(nanoid(10));
+                            setOrigin("adapt");
+                            setScript(null);
+                            setTranscript("");
+                            setSceneFileNames([]);
+                            setSourceReady(false);
+                            setRenderProgress(0);
+                            setScreen("adapt_upload");
+                          }}
+                        >
+                          <Film className="h-6 w-6 text-fuchsia-600" />
+                          <span>
+                            <span className="block text-base font-medium tracking-tight text-slate-900">
+                              Адаптировать ролик
+                            </span>
+                            <span className="mt-1 block text-xs font-normal text-slate-500">
+                              Загрузка → звук и текст → новый сценарий → финал
+                            </span>
                           </span>
-                        </span>
-                        <ChevronRight className="ml-auto h-4 w-4 text-slate-400" />
-                      </Button>
-                    </motion.div>
-                    <motion.div whileHover={{ y: -2 }} transition={{ duration: 0.2 }}>
-                      <Button
-                        variant="secondary"
-                        className="h-full min-h-[140px] w-full flex-col items-stretch justify-between gap-4 rounded-xl border border-slate-200/90 bg-white/70 p-5 text-left shadow-sm backdrop-blur-xl transition hover:border-fuchsia-200 hover:shadow-[0_16px_40px_-16px_rgba(192,38,211,0.18)]"
-                        onClick={() => {
-                          setOrigin("adapt");
-                          setScript(null);
-                          setTranscript("");
-                          setSceneFileNames([]);
-                          setSourceReady(false);
-                          setRenderProgress(0);
-                          setScreen("adapt_upload");
-                        }}
-                      >
-                        <Film className="h-6 w-6 text-fuchsia-600" />
-                        <span>
-                          <span className="block text-base font-medium tracking-tight text-slate-900">
-                            Адаптировать ролик
-                          </span>
-                          <span className="mt-1 block text-xs font-normal text-slate-500">
-                            Загрузка → звук и текст → новый сценарий → финал
-                          </span>
-                        </span>
-                        <ChevronRight className="ml-auto h-4 w-4 text-slate-400" />
-                      </Button>
-                    </motion.div>
-                  </CardContent>
-                </Card>
+                          <ChevronRight className="ml-auto h-4 w-4 text-slate-400" />
+                        </Button>
+                      </motion.div>
+                    </CardContent>
+                  </Card>
+
+                  <Card className="mt-4 border-slate-200/80 bg-white/60 shadow-sm backdrop-blur-md">
+                    <CardHeader>
+                      <StepHeader
+                        icon={History}
+                        title="Ваши рилсы"
+                        description="Все задачи с сервера: откройте любую — тот же сценарий, шаг и jobId. Можно править и снова гнать пайплайн."
+                      />
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      {reelsLoading ? (
+                        <div className="flex justify-center py-6">
+                          <Loader2 className="h-8 w-8 animate-spin text-violet-500" />
+                        </div>
+                      ) : reels.length === 0 ? (
+                        <p className="text-center text-sm text-slate-500">
+                          Пока нет сохранённых сессий. После генерации сценария или шагов пайплайна они появятся здесь.
+                        </p>
+                      ) : (
+                        <ul className="max-h-[min(52vh,360px)] space-y-2 overflow-y-auto pr-1">
+                          {reels.map((r) => (
+                            <li
+                              key={r.jobId}
+                              className="flex flex-col gap-2 rounded-lg border border-slate-100 bg-white/80 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+                            >
+                              <div className="min-w-0 flex-1 space-y-0.5">
+                                <p className="truncate text-sm font-medium text-slate-900">{r.title}</p>
+                                <p className="font-mono text-[10px] text-slate-400">{r.jobId}</p>
+                                <p className="text-[11px] text-slate-500">
+                                  {formatReelDate(r.updatedAt)}
+                                  {!r.hasSession ? " · только файл сценария" : ""}
+                                </p>
+                              </div>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="sm"
+                                className="shrink-0"
+                                disabled={!!busy}
+                                onClick={() => void openReelByJobId(r.jobId)}
+                              >
+                                Открыть
+                              </Button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </CardContent>
+                  </Card>
+                </>
               ) : null}
 
               {screen === "new_topic" ? (

@@ -8,8 +8,8 @@ import { scriptToPlainText } from "@/lib/pipeline/types";
 const log = createLogger("generate_voice");
 
 export async function generateVoice(jobId: string, script: ScriptPayload): Promise<string> {
-  const apiKey = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID;
+  const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
+  const voiceId = process.env.ELEVENLABS_VOICE_ID?.trim();
   if (!apiKey) throw new Error("Не задан ELEVENLABS_API_KEY");
   if (!voiceId) throw new Error("Не задан ELEVENLABS_VOICE_ID");
 
@@ -23,10 +23,14 @@ export async function generateVoice(jobId: string, script: ScriptPayload): Promi
       "xi-api-key": apiKey,
       Accept: "audio/mpeg",
       "Content-Type": "application/json",
+      // Cloudflare на api.elevenlabs.io иногда отдаёт challenge-HTML вместо API, если UA «роботский» (Node fetch).
+      "User-Agent":
+        process.env.ELEVENLABS_USER_AGENT?.trim() ||
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     },
     body: JSON.stringify({
       text,
-      model_id: process.env.ELEVENLABS_MODEL_ID ?? "eleven_multilingual_v2",
+      model_id: process.env.ELEVENLABS_MODEL_ID?.trim() ?? "eleven_multilingual_v2",
     }),
   });
 
