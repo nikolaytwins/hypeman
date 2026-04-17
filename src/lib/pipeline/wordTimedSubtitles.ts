@@ -7,6 +7,17 @@ const log = createLogger("word_timed_subtitles");
 
 export type TimedWord = { word: string; start: number; end: number };
 
+export type WordsToSrtOptions = {
+  /** Макс. длина одной строки (символы); для вертикали 9:16 держите ~28–36. */
+  maxChars?: number;
+  /** Макс. длительность одного cue (с); длиннее — новая строка даже без точки. */
+  maxDurSec?: number;
+  /** Если пауза между словами больше этого — новый cue (сохраняет «фразу за фразой»). */
+  pauseFlushSec?: number;
+  /** Минимальный зазор между концом cue и началом следующего (анти-наложение в libass). */
+  gapBetweenCuesSec?: number;
+};
+
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
 }
@@ -20,11 +31,41 @@ function formatSrtTime(sec: number): string {
   return `${pad2(h)}:${pad2(m)}:${pad2(s)},${String(ms).padStart(3, "0")}`;
 }
 
-/** Склеиваем слова Whisper в блоки SRT: короткие группы ≈ слова, чтобы тайминг совпадал с озвучкой. */
-export function wordsToSrt(words: TimedWord[], maxChars = 28, maxDurSec = 2.2): string {
+/** Одна визуальная строка SRT: без переносов, без лишних пробелов. */
+export function singleLineCueText(text: string): string {
+  return text.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/** Конец предложения по последнему токену (RU/EN, типичный вывод Whisper). */
+export function wordEndsSentence(word: string): boolean {
+  const t = singleLineCueText(word);
+  if (!t) return false;
+  return /[.!?…]["')\]]*$/u.test(t);
+}
+
+/**
+ * Сборка SRT из слов Whisper с **сохранением таймингов слов** (start/end cue = первое/последнее слово).
+ *
+ * Алгоритм:
+ * 1. Идём по словам по порядку, буфер = будущий cue.
+ * 2. Перед добавлением следующего слова: если пауза после последнего в буфере > pauseFlushSec — сброс буфера в cue (новая фраза по паузе).
+ * 3. Если буфер + новое слово даёт строку длиннее maxChars ИЛИ длительность > maxDurSec — сброс, затем слово в новый буфер (жёсткая одна строка на экран).
+ * 4. После добавления слова: если оно заканчивает предложение (. ! ? …) — сброс (одна строка ≈ одно предложение, пока влезает в maxChars).
+ * 5. Текст cue = `join` слов через пробел, **без** `\n` (иначе libass показывает несколько строк сразу).
+ * 6. Постобработка: если end[i] > start[i+1] − gap — подрезаем end[i], чтобы cue не пересекались (иначе «простыня»).
+ *
+ * Почему «Whisper правильный, а на видео нет»: часто ломает не Whisper, а (а) склейка слов в слишком длинные cue,
+ * (б) переносы внутри одного cue, (в) пересечение интервалов → несколько субтитров одновременно.
+ */
+export function wordsToSrt(words: TimedWord[], opts?: WordsToSrtOptions): string {
+  const maxChars = opts?.maxChars ?? 34;
+  const maxDurSec = opts?.maxDurSec ?? 4.2;
+  const pauseFlushSec = opts?.pauseFlushSec ?? 0.42;
+  const gap = opts?.gapBetweenCuesSec ?? 0.04;
+
   const cleaned = words
     .map((w) => ({
-      word: (w.word ?? "").replace(/\s+/g, " ").trim(),
+      word: singleLineCueText(w.word ?? ""),
       start: w.start,
       end: w.end,
     }))
@@ -39,7 +80,7 @@ export function wordsToSrt(words: TimedWord[], maxChars = 28, maxDurSec = 2.2): 
     if (!buf.length) return;
     const start = buf[0].start;
     const end = buf[buf.length - 1].end;
-    const text = buf.map((b) => b.word).join(" ").replace(/\s+/g, " ").trim();
+    const text = singleLineCueText(buf.map((b) => b.word).join(" "));
     if (text) cues.push({ start, end, text });
     buf = [];
   };
@@ -47,26 +88,63 @@ export function wordsToSrt(words: TimedWord[], maxChars = 28, maxDurSec = 2.2): 
   for (const w of cleaned) {
     if (!buf.length) {
       buf.push(w);
+      if (wordEndsSentence(w.word)) flush();
       continue;
     }
-    const nextText = [...buf.map((b) => b.word), w.word].join(" ");
+
+    const last = buf[buf.length - 1];
+    const pause = w.start - last.end;
+    if (pause > pauseFlushSec) {
+      flush();
+      buf.push(w);
+      if (wordEndsSentence(w.word)) flush();
+      continue;
+    }
+
+    const nextText = singleLineCueText([...buf.map((b) => b.word), w.word].join(" "));
     const nextDur = w.end - buf[0].start;
     if (nextText.length > maxChars || nextDur > maxDurSec) {
       flush();
       buf.push(w);
-    } else {
-      buf.push(w);
+      if (wordEndsSentence(w.word)) flush();
+      continue;
     }
+
+    buf.push(w);
+    if (wordEndsSentence(w.word)) flush();
   }
   flush();
 
+  cues.sort((a, b) => a.start - b.start);
+  for (let i = 0; i < cues.length - 1; i++) {
+    const nextStart = cues[i + 1].start;
+    const maxEnd = nextStart - gap;
+    if (cues[i].end > maxEnd) {
+      cues[i].end = Math.max(cues[i].start + gap, maxEnd);
+    }
+  }
+
+  const minDur = 0.03;
   return cues
     .map((c, i) => {
-      const gap = 0.02;
-      const end = Math.max(c.end, c.start + gap);
+      const end = Math.max(c.end, c.start + minDur);
       return `${i + 1}\n${formatSrtTime(c.start)} --> ${formatSrtTime(end)}\n${c.text}\n`;
     })
     .join("\n");
+}
+
+function parseSubtitleEnvInt(name: string, fallback: number): number {
+  const v = process.env[name]?.trim();
+  if (!v) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function parseSubtitleEnvFloat(name: string, fallback: number): number {
+  const v = process.env[name]?.trim();
+  if (!v) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 function getOpenAI(): OpenAI {
@@ -183,8 +261,48 @@ Rules:
   return segs;
 }
 
-export function segmentsToSrt(segments: JsonSeg[]): string {
-  return segments
+/** Длинный сегмент от модели режем на строки ≤ maxChars; время режем пропорционально длине текста (грубо, лучше чем одна простыня). */
+function splitLongSegment(seg: JsonSeg, maxChars: number): JsonSeg[] {
+  const text = singleLineCueText(seg.text);
+  if (!text) return [];
+  if (text.length <= maxChars) return [{ start: seg.start, end: seg.end, text }];
+  const words = text.split(" ");
+  const chunks: string[] = [];
+  let line = "";
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length > maxChars && line) {
+      chunks.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  }
+  if (line) chunks.push(line);
+  const lens = chunks.map((c) => c.length);
+  const totalChars = lens.reduce((a, b) => a + b, 0);
+  const span = Math.max(seg.end - seg.start, 0.08);
+  const out: JsonSeg[] = [];
+  let t = seg.start;
+  for (let i = 0; i < chunks.length; i++) {
+    const isLast = i === chunks.length - 1;
+    const chunkDur = isLast ? seg.end - t : Math.max(0.06, span * (lens[i] / totalChars));
+    const end = isLast ? seg.end : t + chunkDur;
+    out.push({ start: t, end: Math.max(t + 0.04, end), text: chunks[i] });
+    t = end;
+  }
+  return out;
+}
+
+export function segmentsToSrt(segments: JsonSeg[], maxChars = 34): string {
+  const flat = segments.flatMap((s) => splitLongSegment(s, maxChars));
+  flat.sort((a, b) => a.start - b.start);
+  const gap = 0.04;
+  for (let i = 0; i < flat.length - 1; i++) {
+    const maxEnd = flat[i + 1].start - gap;
+    if (flat[i].end > maxEnd) flat[i].end = Math.max(flat[i].start + gap, maxEnd);
+  }
+  return flat
     .map((c, i) => {
       const end = Math.max(c.end, c.start + 0.04);
       return `${i + 1}\n${formatSrtTime(c.start)} --> ${formatSrtTime(end)}\n${c.text}\n`;
@@ -194,10 +312,20 @@ export function segmentsToSrt(segments: JsonSeg[]): string {
 
 /** Пайплайн: OpenAI words → SRT; иначе OpenRouter JSON → SRT; иначе throw (вызывающий сделает fallback). */
 export async function buildSyncedSrtFromAudio(audioPath: string): Promise<string> {
+  const lineMax = parseSubtitleEnvInt("SUBTITLE_LINE_MAX_CHARS", 34);
+  const cueMaxSec = parseSubtitleEnvFloat("SUBTITLE_CUE_MAX_SEC", 4.2);
+  const pauseFlush = parseSubtitleEnvFloat("SUBTITLE_PAUSE_FLUSH_SEC", 0.42);
+  const cueGap = parseSubtitleEnvFloat("SUBTITLE_GAP_BETWEEN_CUES_SEC", 0.04);
+
   if (process.env.OPENAI_API_KEY?.trim()) {
     try {
       const words = await transcribeWordsOpenAI(audioPath);
-      return wordsToSrt(words);
+      return wordsToSrt(words, {
+        maxChars: lineMax,
+        maxDurSec: cueMaxSec,
+        pauseFlushSec: pauseFlush,
+        gapBetweenCuesSec: cueGap,
+      });
     } catch (e) {
       log.warn("openai_words_failed", { message: e instanceof Error ? e.message : String(e) });
     }
@@ -205,7 +333,7 @@ export async function buildSyncedSrtFromAudio(audioPath: string): Promise<string
   if (process.env.OPENROUTER_API_KEY?.trim()) {
     try {
       const segs = await transcribeSegmentsOpenRouter(audioPath);
-      return segmentsToSrt(segs);
+      return segmentsToSrt(segs, lineMax);
     } catch (e) {
       log.warn("openrouter_segments_failed", { message: e instanceof Error ? e.message : String(e) });
     }
