@@ -25,7 +25,7 @@ import {
   PartyPopper,
   ScrollText,
   History,
-  Activity,
+  X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -47,6 +47,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
+import type { ActiveOperationRow } from "@/lib/pipeline/activeOperations";
 import type { ScriptPayload } from "@/lib/pipeline/types";
 import type { ReelListItem } from "@/lib/studioSession";
 import {
@@ -63,6 +64,7 @@ import {
   type StudioStateSnapshot,
 } from "@/lib/studioSession";
 import { cn } from "@/lib/utils";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
 type LogEntry = { t: string; level: "info" | "error"; msg: string };
@@ -71,6 +73,10 @@ const ERR_REQUEST = "Ошибка запроса";
 const ERR_UPLOAD = "Ошибка загрузки";
 /** Совпадает с setBusy в uploadSource — для UI индикатора загрузки. */
 const BUSY_UPLOAD_VIDEO = "Загрузка видео";
+
+function pipelineErrorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 function formatTime() {
   return new Date().toLocaleTimeString("ru-RU", {
@@ -82,22 +88,6 @@ function formatTime() {
 
 function formatReelDate(ms: number) {
   return new Date(ms).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
-}
-
-type PipelineActiveRow = {
-  jobId: string;
-  step: string;
-  label: string;
-  startedAt: number;
-  elapsedSec: number;
-  parallel: number;
-};
-
-function formatPipelineElapsed(sec: number): string {
-  if (sec < 60) return `${sec} с`;
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${m} мин ${s} с`;
 }
 
 /** Грубая оценка «сколько ещё» по шагу (параллельные вкладки / трей). */
@@ -188,9 +178,10 @@ export function StudioApp() {
 
   const [reels, setReels] = useState<ReelListItem[]>([]);
   const [reelsLoading, setReelsLoading] = useState(false);
-  const [activePipeline, setActivePipeline] = useState<PipelineActiveRow[]>([]);
-
-  const otherReels = useMemo(() => reels.filter((r) => r.jobId !== jobId).slice(0, 6), [reels, jobId]);
+  /** Долгие операции в этом процессе Node — для плашки «На сервере ещё выполняется». */
+  const [activePipeline, setActivePipeline] = useState<ActiveOperationRow[]>([]);
+  /** Сбой длинного конвейера в этой вкладке — показываем в той же плашке, пока не закроют или не запустят снова. */
+  const [serverPipelineBannerError, setServerPipelineBannerError] = useState<string | null>(null);
 
   const pushLog = useCallback((msg: string, level: LogEntry["level"] = "info") => {
     setLogs((prev) => [...prev.slice(-60), { t: formatTime(), level, msg }]);
@@ -284,27 +275,6 @@ export function StudioApp() {
   }, [reelFromUrl, applySnapshot, pushLog]);
 
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const r = await fetch("/api/pipeline-active");
-        const d = await r.json();
-        if (!cancelled && r.ok && Array.isArray(d.operations)) {
-          setActivePipeline(d.operations as PipelineActiveRow[]);
-        }
-      } catch {
-        if (!cancelled) setActivePipeline([]);
-      }
-    };
-    void load();
-    const id = window.setInterval(load, 4000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, []);
-
-  useEffect(() => {
     if (screen !== "pick") return;
     let cancelled = false;
     (async () => {
@@ -336,6 +306,29 @@ export function StudioApp() {
     };
     void load();
     const id = window.setInterval(load, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [screen]);
+
+  useEffect(() => {
+    if (screen === "pick") {
+      setActivePipeline([]);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const r = await fetch("/api/pipeline-active");
+        const d = (await r.json()) as { operations?: ActiveOperationRow[] };
+        if (!cancelled && r.ok && Array.isArray(d.operations)) setActivePipeline(d.operations);
+      } catch {
+        if (!cancelled) setActivePipeline([]);
+      }
+    };
+    void tick();
+    const id = window.setInterval(tick, 4000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
@@ -414,6 +407,7 @@ export function StudioApp() {
     setSourceReady(false);
     setLogs([]);
     setRenderProgress(0);
+    setServerPipelineBannerError(null);
     pushLog("Новая задача");
   };
 
@@ -532,6 +526,7 @@ export function StudioApp() {
     setBusy("Аудио и расшифровка");
     pushLog("Извлечение аудио…");
     try {
+      setServerPipelineBannerError(null);
       const r1 = await fetch("/api/extract-audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -551,6 +546,7 @@ export function StudioApp() {
       pushLog("Расшифровка готова");
       setScreen("adapt_rewrite");
     } catch (e) {
+      setServerPipelineBannerError(pipelineErrorMessage(e));
       fail(e);
     } finally {
       setBusy(null);
@@ -562,6 +558,7 @@ export function StudioApp() {
     setBusy("Озвучка");
     pushLog("Генерация озвучки…");
     try {
+      setServerPipelineBannerError(null);
       const res = await fetch("/api/generate-voice", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -571,6 +568,7 @@ export function StudioApp() {
       if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
       pushLog("voice.mp3 сохранён");
     } catch (e) {
+      setServerPipelineBannerError(pipelineErrorMessage(e));
       fail(e);
     } finally {
       setBusy(null);
@@ -671,6 +669,7 @@ export function StudioApp() {
       }},
     ];
     try {
+      setServerPipelineBannerError(null);
       pushLog("Запуск конвейера ffmpeg…");
       for (const s of steps) {
         await s.fn();
@@ -678,6 +677,7 @@ export function StudioApp() {
       }
       setScreen("done");
     } catch (e) {
+      setServerPipelineBannerError(pipelineErrorMessage(e));
       fail(e);
     } finally {
       setBusy(null);
@@ -731,6 +731,7 @@ export function StudioApp() {
       },
     ];
     try {
+      setServerPipelineBannerError(null);
       pushLog("Режим: только субтитры на исходный ролик…");
       for (const s of steps) {
         await s.fn();
@@ -738,6 +739,7 @@ export function StudioApp() {
       }
       setScreen("done");
     } catch (e) {
+      setServerPipelineBannerError(pipelineErrorMessage(e));
       fail(e);
     } finally {
       setBusy(null);
@@ -795,12 +797,7 @@ export function StudioApp() {
 
   return (
     <>
-    <div
-      className={cn(
-        "relative z-10 mx-auto min-h-full w-full max-w-6xl px-4 py-8 sm:px-6 lg:px-10 lg:py-12",
-        screen !== "pick" && otherReels.length > 0 && "pb-28",
-      )}
-    >
+    <div className="relative z-10 mx-auto min-h-full w-full max-w-6xl px-4 py-8 sm:px-6 lg:px-10 lg:py-12">
       <div className="grid grid-cols-12 gap-4 lg:gap-5">
         <header
           className={cn(
@@ -827,88 +824,79 @@ export function StudioApp() {
             Сессия каждого рилса пишется на сервер (можно вернуться позже), плюс черновик в этой вкладке (новая вкладка
             — новая задача с нуля). Прямая ссылка: <span className="font-mono text-xs">?reel=ваш-jobId</span>.
           </p>
+          <p className={cn("pt-1", screen === "pick" ? "text-center" : "")}>
+            <Link
+              href="/status"
+              className="text-[10px] text-slate-400/70 underline-offset-2 hover:text-slate-500 hover:underline"
+              prefetch={false}
+            >
+              нагрузка
+            </Link>
+          </p>
         </header>
 
-        {screen === "pick" ? (
-          <Card className="col-span-12 border-amber-200/80 bg-gradient-to-br from-amber-50/90 to-orange-50/50 shadow-sm backdrop-blur-md">
-            <CardHeader className="pb-2">
-              <StepHeader
-                icon={Activity}
-                title="На сервере сейчас"
-                description="Долгие шаги (ffmpeg, субтитры, озвучка, ИИ) в этом процессе Node. Обновление каждые ~4 с. Не запускайте тяжёлое параллельно без необходимости."
-              />
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {activePipeline.length === 0 ? (
-                <p className="text-sm text-slate-600">Нет активных долгих операций — можно грузить сервер новым шагом.</p>
-              ) : (
-                <ul className="space-y-2">
-                  {activePipeline.map((op) => (
-                    <li
-                      key={`${op.jobId}-${op.step}-${op.startedAt}`}
-                      className="flex flex-col gap-1 rounded-lg border border-amber-200/60 bg-white/70 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
-                    >
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-slate-900">{op.label}</p>
-                        <p className="font-mono text-[10px] text-slate-500">{op.jobId}</p>
-                      </div>
-                      <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-slate-600">
-                        <span>{formatPipelineElapsed(op.elapsedSec)}</span>
-                        {op.parallel > 1 ? (
-                          <span className="rounded bg-amber-200/80 px-1.5 py-0.5 text-[10px] font-medium text-amber-900">
-                            ×{op.parallel} параллельно
-                          </span>
-                        ) : null}
-                        {op.jobId === jobId ? (
-                          <span className="text-[10px] text-violet-600">эта вкладка</span>
-                        ) : null}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              <p className="text-[10px] leading-relaxed text-slate-500">
-                PM2 в режиме cluster (несколько воркеров): список отражает только текущий воркер — для полной картины смотрите{" "}
-                <span className="font-mono">top</span> / <span className="font-mono">pm2 monit</span>.
-              </p>
-            </CardContent>
-          </Card>
-        ) : null}
-
         {screen !== "pick" ? (
-          <>
-            <Card className="col-span-12 p-4 lg:col-span-12">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="flex items-center gap-2 text-xs text-slate-500">
-                  <span className="inline-flex h-1.5 w-1.5 rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 shadow-[0_0_8px_rgba(124,58,237,0.35)]" />
-                  <span className="tracking-tight">{screenTitle[screen]}</span>
-                </div>
-                <span className="font-mono text-[10px] text-slate-400">{jobId}</span>
+          <Card className="col-span-12 p-4 lg:col-span-12">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2 text-xs text-slate-500">
+                <span className="inline-flex h-1.5 w-1.5 rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 shadow-[0_0_8px_rgba(124,58,237,0.35)]" />
+                <span className="tracking-tight">{screenTitle[screen]}</span>
               </div>
-              <div className="mt-3">
-                <Progress value={stepProgress} />
+              <span className="font-mono text-[10px] text-slate-400">{jobId}</span>
+            </div>
+            <div className="mt-3">
+              <Progress value={stepProgress} />
+            </div>
+            {activePipeline.length > 0 || serverPipelineBannerError ? (
+              <div
+                className={cn(
+                  "mt-3 rounded-xl border px-3 py-2.5 text-xs",
+                  serverPipelineBannerError
+                    ? "border-red-200/90 bg-red-50/50"
+                    : "border-amber-200/80 bg-amber-50/40",
+                )}
+              >
+                {serverPipelineBannerError ? (
+                  <div className="flex items-start gap-2">
+                    <p className="min-w-0 flex-1 leading-snug text-red-800">
+                      <span className="font-medium">Ошибка конвейера.</span> {serverPipelineBannerError}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 shrink-0 text-red-700/70 hover:bg-red-100/80 hover:text-red-900"
+                      aria-label="Скрыть сообщение об ошибке"
+                      onClick={() => setServerPipelineBannerError(null)}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                ) : null}
+                {activePipeline.length > 0 ? (
+                  <div className={serverPipelineBannerError ? "mt-2 border-t border-amber-200/60 pt-2" : ""}>
+                    <p className="font-medium text-amber-950/90">На сервере ещё выполняется</p>
+                    <ul className="mt-1.5 space-y-1 font-mono text-[10px] text-amber-900/75">
+                      {activePipeline.map((op) => (
+                        <li key={op.jobId} className="break-all">
+                          <span className="text-amber-800/80">{op.label}</span>
+                          {op.jobId !== jobId ? (
+                            <span className="text-amber-700/60"> · {op.jobId}</span>
+                          ) : null}
+                          <span className="text-amber-700/50"> · {op.elapsedSec} с</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+                <p className="mt-2 text-[10px] text-slate-500">
+                  <Link href="/status" className="underline-offset-2 hover:underline" prefetch={false}>
+                    Все задачи и нагрузка
+                  </Link>
+                </p>
               </div>
-            </Card>
-            {activePipeline.length > 0 ? (
-              <Card className="col-span-12 border-amber-200/80 bg-amber-50/50 p-4 shadow-sm">
-                <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-amber-950">
-                  <Activity className="h-4 w-4" />
-                  На сервере ещё выполняется
-                </div>
-                <ul className="space-y-1.5 text-sm text-slate-800">
-                  {activePipeline.map((op) => (
-                    <li key={`${op.jobId}-${op.step}-${op.startedAt}`} className="flex flex-wrap items-baseline justify-between gap-2">
-                      <span className="min-w-0 font-medium">{op.label}</span>
-                      <span className="font-mono text-[10px] text-slate-500">
-                        {op.jobId} · {formatPipelineElapsed(op.elapsedSec)}
-                        {op.jobId === jobId ? " · эта вкладка" : ""}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </Card>
             ) : null}
-          </>
+          </Card>
         ) : null}
 
         <div
@@ -1557,43 +1545,6 @@ export function StudioApp() {
         </DialogContent>
       </Dialog>
     </div>
-
-    {screen !== "pick" && otherReels.length > 0 ? (
-      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 px-3 pb-3 sm:px-6">
-        <div className="pointer-events-auto mx-auto max-w-3xl rounded-xl border border-slate-200/90 bg-white/95 p-3 shadow-lg shadow-slate-900/10 backdrop-blur-md">
-          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-            Другие задачи на сервере
-          </p>
-          <ul className="max-h-[min(28vh,200px)] space-y-2 overflow-y-auto">
-            {otherReels.map((r) => (
-              <li
-                key={r.jobId}
-                className="flex flex-col gap-2 rounded-lg border border-slate-100 bg-slate-50/80 px-2.5 py-2 sm:flex-row sm:items-center sm:justify-between"
-              >
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-xs font-medium text-slate-900">{r.title}</p>
-                  <p className="font-mono text-[9px] text-slate-400">{r.jobId}</p>
-                  <p className="text-[10px] text-slate-500">
-                    {r.screen ? screenTitle[r.screen] : "Шаг неизвестен"}
-                    <span className="text-slate-400"> · {reelRoughEta(r)}</span>
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  className="h-8 shrink-0 text-xs"
-                  disabled={!!busy}
-                  onClick={() => void openReelByJobId(r.jobId)}
-                >
-                  Открыть
-                </Button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    ) : null}
     </>
   );
 }
