@@ -1,10 +1,18 @@
-# Деплой на Selectel: сборка на runner (не нагружает VPS), на сервер — только rsync + PM2.
+# Деплой на Selectel: сборка на runner, на VPS — rsync + PM2.
+# Нужны секреты репозитория (Settings → Secrets and variables → Actions):
+#   DEPLOY_HOST   = IP или хост (например 178.72.168.156)
+#   DEPLOY_USER   = SSH-пользователь (например root)
+#   DEPLOY_SSH_KEY = приватный ключ целиком (-----BEGIN ... OPEN PRIVATE KEY-----)
+# Публичный ключ этого же ключа должен быть в ~/.ssh/authorized_keys на сервере.
 name: Deploy to Selectel
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: deploy-selectel
@@ -15,6 +23,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Проверка секретов
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          ok=1
+          if [ -z "$DEPLOY_HOST" ]; then echo "::error::Нет секрета DEPLOY_HOST"; ok=0; fi
+          if [ -z "$DEPLOY_USER" ]; then echo "::error::Нет секрета DEPLOY_USER"; ok=0; fi
+          if [ -z "$DEPLOY_SSH_KEY" ]; then echo "::error::Нет секрета DEPLOY_SSH_KEY"; ok=0; fi
+          if [ "$ok" != 1 ]; then
+            echo "GitHub → репозиторий → Settings → Secrets and variables → Actions → New repository secret"
+            exit 1
+          fi
+          echo "Секреты DEPLOY_* на месте."
 
       - uses: actions/setup-node@v4
         with:
