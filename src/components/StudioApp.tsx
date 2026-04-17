@@ -25,6 +25,7 @@ import {
   PartyPopper,
   ScrollText,
   History,
+  Activity,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -81,6 +82,22 @@ function formatTime() {
 
 function formatReelDate(ms: number) {
   return new Date(ms).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
+}
+
+type PipelineActiveRow = {
+  jobId: string;
+  step: string;
+  label: string;
+  startedAt: number;
+  elapsedSec: number;
+  parallel: number;
+};
+
+function formatPipelineElapsed(sec: number): string {
+  if (sec < 60) return `${sec} с`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m} мин ${s} с`;
 }
 
 /** Грубая оценка «сколько ещё» по шагу (параллельные вкладки / трей). */
@@ -171,6 +188,7 @@ export function StudioApp() {
 
   const [reels, setReels] = useState<ReelListItem[]>([]);
   const [reelsLoading, setReelsLoading] = useState(false);
+  const [activePipeline, setActivePipeline] = useState<PipelineActiveRow[]>([]);
 
   const otherReels = useMemo(() => reels.filter((r) => r.jobId !== jobId).slice(0, 6), [reels, jobId]);
 
@@ -264,6 +282,27 @@ export function StudioApp() {
       cancelled = true;
     };
   }, [reelFromUrl, applySnapshot, pushLog]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const r = await fetch("/api/pipeline-active");
+        const d = await r.json();
+        if (!cancelled && r.ok && Array.isArray(d.operations)) {
+          setActivePipeline(d.operations as PipelineActiveRow[]);
+        }
+      } catch {
+        if (!cancelled) setActivePipeline([]);
+      }
+    };
+    void load();
+    const id = window.setInterval(load, 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
 
   useEffect(() => {
     if (screen !== "pick") return;
@@ -790,19 +829,86 @@ export function StudioApp() {
           </p>
         </header>
 
-        {screen !== "pick" ? (
-          <Card className="col-span-12 p-4 lg:col-span-12">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-center gap-2 text-xs text-slate-500">
-                <span className="inline-flex h-1.5 w-1.5 rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 shadow-[0_0_8px_rgba(124,58,237,0.35)]" />
-                <span className="tracking-tight">{screenTitle[screen]}</span>
-              </div>
-              <span className="font-mono text-[10px] text-slate-400">{jobId}</span>
-            </div>
-            <div className="mt-3">
-              <Progress value={stepProgress} />
-            </div>
+        {screen === "pick" ? (
+          <Card className="col-span-12 border-amber-200/80 bg-gradient-to-br from-amber-50/90 to-orange-50/50 shadow-sm backdrop-blur-md">
+            <CardHeader className="pb-2">
+              <StepHeader
+                icon={Activity}
+                title="На сервере сейчас"
+                description="Долгие шаги (ffmpeg, субтитры, озвучка, ИИ) в этом процессе Node. Обновление каждые ~4 с. Не запускайте тяжёлое параллельно без необходимости."
+              />
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {activePipeline.length === 0 ? (
+                <p className="text-sm text-slate-600">Нет активных долгих операций — можно грузить сервер новым шагом.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {activePipeline.map((op) => (
+                    <li
+                      key={`${op.jobId}-${op.step}-${op.startedAt}`}
+                      className="flex flex-col gap-1 rounded-lg border border-amber-200/60 bg-white/70 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-slate-900">{op.label}</p>
+                        <p className="font-mono text-[10px] text-slate-500">{op.jobId}</p>
+                      </div>
+                      <div className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-slate-600">
+                        <span>{formatPipelineElapsed(op.elapsedSec)}</span>
+                        {op.parallel > 1 ? (
+                          <span className="rounded bg-amber-200/80 px-1.5 py-0.5 text-[10px] font-medium text-amber-900">
+                            ×{op.parallel} параллельно
+                          </span>
+                        ) : null}
+                        {op.jobId === jobId ? (
+                          <span className="text-[10px] text-violet-600">эта вкладка</span>
+                        ) : null}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="text-[10px] leading-relaxed text-slate-500">
+                PM2 в режиме cluster (несколько воркеров): список отражает только текущий воркер — для полной картины смотрите{" "}
+                <span className="font-mono">top</span> / <span className="font-mono">pm2 monit</span>.
+              </p>
+            </CardContent>
           </Card>
+        ) : null}
+
+        {screen !== "pick" ? (
+          <>
+            <Card className="col-span-12 p-4 lg:col-span-12">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <span className="inline-flex h-1.5 w-1.5 rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500 shadow-[0_0_8px_rgba(124,58,237,0.35)]" />
+                  <span className="tracking-tight">{screenTitle[screen]}</span>
+                </div>
+                <span className="font-mono text-[10px] text-slate-400">{jobId}</span>
+              </div>
+              <div className="mt-3">
+                <Progress value={stepProgress} />
+              </div>
+            </Card>
+            {activePipeline.length > 0 ? (
+              <Card className="col-span-12 border-amber-200/80 bg-amber-50/50 p-4 shadow-sm">
+                <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-amber-950">
+                  <Activity className="h-4 w-4" />
+                  На сервере ещё выполняется
+                </div>
+                <ul className="space-y-1.5 text-sm text-slate-800">
+                  {activePipeline.map((op) => (
+                    <li key={`${op.jobId}-${op.step}-${op.startedAt}`} className="flex flex-wrap items-baseline justify-between gap-2">
+                      <span className="min-w-0 font-medium">{op.label}</span>
+                      <span className="font-mono text-[10px] text-slate-500">
+                        {op.jobId} · {formatPipelineElapsed(op.elapsedSec)}
+                        {op.jobId === jobId ? " · эта вкладка" : ""}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </Card>
+            ) : null}
+          </>
         ) : null}
 
         <div

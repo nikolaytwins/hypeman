@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createLogger } from "@/lib/logger";
 import { ensureJobDirs, ensureStorageDirs } from "@/lib/paths";
+import { withActiveTracking } from "@/lib/pipeline/activeOperations";
 import { extractAudioFromVideo } from "@/lib/pipeline/extractAudio";
 
 export const runtime = "nodejs";
@@ -16,11 +17,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Нужен jobId" }, { status: 400 });
     }
     await ensureJobDirs(body.jobId);
-    const out = await extractAudioFromVideo(body.jobId, {
-      inputFileName: body.inputFileName,
+    return await withActiveTracking(body.jobId, "extract-audio", async () => {
+      const out = await extractAudioFromVideo(body.jobId, {
+        inputFileName: body.inputFileName,
+      });
+      log.info("ok", { out });
+      return NextResponse.json({ jobId: body.jobId, extractedPath: out });
     });
-    log.info("ok", { out });
-    return NextResponse.json({ jobId: body.jobId, extractedPath: out });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Неизвестная ошибка";
     log.error("failed", { message });

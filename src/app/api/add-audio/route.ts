@@ -2,6 +2,7 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 import { createLogger } from "@/lib/logger";
 import { ensureJobDirs, ensureStorageDirs, jobAudioDir, jobOutputDir } from "@/lib/paths";
+import { withActiveTracking } from "@/lib/pipeline/activeOperations";
 import { addAudio } from "@/lib/pipeline/addAudio";
 
 export const runtime = "nodejs";
@@ -21,12 +22,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Нужен jobId" }, { status: 400 });
     }
     await ensureJobDirs(body.jobId);
-    const videoPath =
-      body.videoPath ?? path.join(jobOutputDir(body.jobId), "merged_no_audio.mp4");
-    const audioPath = path.join(jobAudioDir(body.jobId), body.audioFileName ?? "voice.mp3");
-    const out = await addAudio(body.jobId, { videoPath, audioPath });
-    log.info("ok", { out });
-    return NextResponse.json({ videoPath: out });
+    return await withActiveTracking(body.jobId, "add-audio", async () => {
+      const videoPath =
+        body.videoPath ?? path.join(jobOutputDir(body.jobId), "merged_no_audio.mp4");
+      const audioPath = path.join(jobAudioDir(body.jobId), body.audioFileName ?? "voice.mp3");
+      const out = await addAudio(body.jobId, { videoPath, audioPath });
+      log.info("ok", { out });
+      return NextResponse.json({ videoPath: out });
+    });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Неизвестная ошибка";
     log.error("failed", { message });

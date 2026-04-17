@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createLogger } from "@/lib/logger";
 import { ensureJobDirs, ensureStorageDirs } from "@/lib/paths";
+import { withActiveTracking } from "@/lib/pipeline/activeOperations";
 import { generateVoice } from "@/lib/pipeline/generateVoice";
 import type { ScriptPayload } from "@/lib/pipeline/types";
 
@@ -17,9 +18,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Нужны jobId и объект script" }, { status: 400 });
     }
     await ensureJobDirs(body.jobId);
-    const audioPath = await generateVoice(body.jobId, body.script);
-    log.info("ok", { audioPath });
-    return NextResponse.json({ audioPath: "/audio/voice.mp3", jobId: body.jobId });
+    return await withActiveTracking(body.jobId, "generate-voice", async () => {
+      const audioPath = await generateVoice(body.jobId, body.script);
+      log.info("ok", { audioPath });
+      return NextResponse.json({ audioPath: "/audio/voice.mp3", jobId: body.jobId });
+    });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Неизвестная ошибка";
     log.error("failed", { message });

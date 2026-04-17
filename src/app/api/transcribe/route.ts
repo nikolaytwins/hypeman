@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createLogger } from "@/lib/logger";
 import { ensureJobDirs, ensureStorageDirs } from "@/lib/paths";
+import { withActiveTracking } from "@/lib/pipeline/activeOperations";
 import { transcribeToText } from "@/lib/pipeline/generateSubtitles";
 
 export const runtime = "nodejs";
@@ -16,10 +17,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Нужен jobId" }, { status: 400 });
     }
     await ensureJobDirs(body.jobId);
-    const name = body.audioFileName ?? "extracted.mp3";
-    const text = await transcribeToText(body.jobId, name);
-    log.info("ok", { chars: text.length });
-    return NextResponse.json({ transcript: text });
+    return await withActiveTracking(body.jobId, "transcribe", async () => {
+      const name = body.audioFileName ?? "extracted.mp3";
+      const text = await transcribeToText(body.jobId, name);
+      log.info("ok", { chars: text.length });
+      return NextResponse.json({ transcript: text });
+    });
   } catch (e) {
     const message = e instanceof Error ? e.message : "Неизвестная ошибка";
     log.error("failed", { message });
