@@ -4,7 +4,7 @@ from pydantic import BaseModel
 import uvicorn
 
 app = FastAPI()
-model = WhisperModel("base", device="cpu", compute_type="int8")
+model = WhisperModel("large-v3", device="cpu", compute_type="int8")
 
 
 class TranscribeRequest(BaseModel):
@@ -18,7 +18,10 @@ def transcribe(req: TranscribeRequest):
         segments, _ = model.transcribe(
             req.audio_path,
             word_timestamps=True,
-            language=req.language,
+            language=req.language if req.language else None,
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
         )
         words = []
         for segment in segments:
