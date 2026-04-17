@@ -3,7 +3,8 @@
 #   DEPLOY_HOST   = IP или хост (например 178.72.168.156)
 #   DEPLOY_USER   = SSH-пользователь (например root)
 #   DEPLOY_SSH_KEY = приватный ключ целиком (-----BEGIN ... OPEN PRIVATE KEY-----)
-# Публичный ключ этого же ключа должен быть в ~/.ssh/authorized_keys на сервере.
+# Публичный ключ пары DEPLOY_SSH_KEY уже добавлен на сервере в /root/.ssh/authorized_keys
+# (ключ hypeman_github_deploy). В секрет кладите только ПРИВАТНЫЙ файл целиком.
 name: Deploy to Selectel
 
 on:
@@ -22,7 +23,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Проверка секретов
         env:
@@ -40,7 +41,7 @@ jobs:
           fi
           echo "Секреты DEPLOY_* на месте."
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -59,25 +60,50 @@ jobs:
           SSH_HOST: ${{ secrets.DEPLOY_HOST }}
           SSH_USER: ${{ secrets.DEPLOY_USER }}
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 700 ~/.ssh
+          # Секрет: без CRLF, с одной финальной переводом строки (иначе OpenSSH ругается)
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          printf 'Host deploy-target\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/deploy_key\n  StrictHostKeyChecking yes\n' "$SSH_HOST" "$SSH_USER" >> ~/.ssh/config
+          head -1 ~/.ssh/deploy_key | grep -qE 'BEGIN (OPENSSH|RSA|EC) PRIVATE KEY' || {
+            echo "::error::DEPLOY_SSH_KEY должен начинаться с строки BEGIN … PRIVATE KEY (вставьте приватный ключ целиком, не .pub)"
+            exit 1
+          }
+          ssh-keyscan -H -p 22 "$SSH_HOST" >> ~/.ssh/known_hosts
+          {
+            echo "Host deploy-target"
+            echo "  HostName $SSH_HOST"
+            echo "  User $SSH_USER"
+            echo "  Port 22"
+            echo "  IdentityFile ~/.ssh/deploy_key"
+            echo "  IdentitiesOnly yes"
+            echo "  StrictHostKeyChecking yes"
+          } >> ~/.ssh/config
+
+      - name: Проверка SSH до сервера
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o ConnectTimeout=20 deploy-target 'echo OK && whoami && hostname'
 
       - name: Rsync application
-        env:
-          SSH_HOST: ${{ secrets.DEPLOY_HOST }}
-        run: rsync -az --delete -e ssh release/ "deploy-target:/mnt/data/hypeman/current/"
+        run: |
+          set -euo pipefail
+          RSYNC_SSH="ssh -o BatchMode=yes -o IdentitiesOnly=yes"
+          rsync -az --delete -e "$RSYNC_SSH" release/ "deploy-target:/mnt/data/hypeman/current/"
 
       - name: Link production env (вне rsync — не затирается)
         run: |
-          ssh deploy-target 'test -f /mnt/data/hypeman/.env.production && ln -sf /mnt/data/hypeman/.env.production /mnt/data/hypeman/current/.env.production || true'
+          set -euo pipefail
+          ssh -o BatchMode=yes deploy-target 'test -f /mnt/data/hypeman/.env.production && ln -sf /mnt/data/hypeman/.env.production /mnt/data/hypeman/current/.env.production || true'
 
       - name: Rsync PM2 config
-        run: scp infra/ecosystem.config.cjs "deploy-target:/mnt/data/hypeman/ecosystem.config.cjs"
+        run: |
+          set -euo pipefail
+          scp -o BatchMode=yes -o IdentitiesOnly=yes infra/ecosystem.config.cjs "deploy-target:/mnt/data/hypeman/ecosystem.config.cjs"
 
       - name: PM2 reload
         run: |
-          ssh deploy-target 'mkdir -p /mnt/data/hypeman/current/storage/{input,audio,scenes,output}'
-          ssh deploy-target 'cd /mnt/data/hypeman && (pm2 describe hypeman >/dev/null 2>&1 && pm2 reload ecosystem.config.cjs --only hypeman --update-env || pm2 start ecosystem.config.cjs) && pm2 save'
+          set -euo pipefail
+          ssh -o BatchMode=yes deploy-target 'mkdir -p /mnt/data/hypeman/current/storage/{input,audio,scenes,output}'
+          ssh -o BatchMode=yes deploy-target 'cd /mnt/data/hypeman && (pm2 describe hypeman >/dev/null 2>&1 && pm2 reload ecosystem.config.cjs --only hypeman --update-env || pm2 start ecosystem.config.cjs) && pm2 save'
