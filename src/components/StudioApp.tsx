@@ -49,8 +49,9 @@ import { Textarea } from "@/components/ui/textarea";
 import type { ScriptPayload } from "@/lib/pipeline/types";
 import type { ReelListItem } from "@/lib/studioSession";
 import {
-  STUDIO_DRAFT_KEY,
   clearStudioDraft,
+  readStudioDraftRaw,
+  writeStudioDraftRaw,
   draftHasWork,
   isValidJobId,
   setLastReelJobId,
@@ -67,6 +68,8 @@ type LogEntry = { t: string; level: "info" | "error"; msg: string };
 
 const ERR_REQUEST = "Ошибка запроса";
 const ERR_UPLOAD = "Ошибка загрузки";
+/** Совпадает с setBusy в uploadSource — для UI индикатора загрузки. */
+const BUSY_UPLOAD_VIDEO = "Загрузка видео";
 
 function formatTime() {
   return new Date().toLocaleTimeString("ru-RU", {
@@ -134,7 +137,9 @@ function StepHeader({
       </div>
       <div className="min-w-0 flex-1 space-y-1">
         <h3 className="text-lg font-semibold tracking-tight text-slate-900">{title}</h3>
-        {description ? <p className="text-sm leading-relaxed text-slate-500">{description}</p> : null}
+        {description ? (
+          <p className="text-sm leading-relaxed text-pretty break-words text-slate-500">{description}</p>
+        ) : null}
       </div>
     </div>
   );
@@ -150,11 +155,12 @@ export function StudioApp() {
   const [sceneFileNames, setSceneFileNames] = useState<string[]>([]);
   const [sourceReady, setSourceReady] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const uploadingVideo = busy === BUSY_UPLOAD_VIDEO;
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [errOpen, setErrOpen] = useState(false);
   const [errMsg, setErrMsg] = useState("");
   const [renderProgress, setRenderProgress] = useState(0);
-  /** Пока false — не пишем в localStorage, чтобы не затереть черновик до восстановления. */
+  /** Пока false — не пишем в sessionStorage, чтобы не затереть черновик до восстановления. */
   const [studioHydrated, setStudioHydrated] = useState(false);
   const scenesInputRef = useRef<HTMLInputElement>(null);
   const sourceInputRef = useRef<HTMLInputElement>(null);
@@ -227,25 +233,25 @@ export function StudioApp() {
             pushLog("Загружена сессия с сервера");
           }
         } else {
-          const raw = localStorage.getItem(STUDIO_DRAFT_KEY);
+          const raw = readStudioDraftRaw();
           if (raw) {
             const d = JSON.parse(raw) as Partial<StudioDraftV1>;
             const snap = snapshotFromDraft(d);
             if (snap && !cancelled) {
               applySnapshot(snap);
-              pushLog("Черновик восстановлен — продолжайте с того же шага");
+              pushLog("Черновик этой вкладки восстановлен — продолжайте с того же шага");
             }
           }
         }
       } catch {
         try {
-          const raw = localStorage.getItem(STUDIO_DRAFT_KEY);
+          const raw = readStudioDraftRaw();
           if (raw) {
             const d = JSON.parse(raw) as Partial<StudioDraftV1>;
             const snap = snapshotFromDraft(d);
             if (snap && !cancelled) {
               applySnapshot(snap);
-              pushLog("Черновик из браузера (сессия по ссылке недоступна)");
+              pushLog("Черновик вкладки (сессия по ссылке недоступна)");
             }
           }
         } catch {
@@ -330,7 +336,7 @@ export function StudioApp() {
           renderProgress,
         };
         if (screen !== "done") {
-          localStorage.setItem(STUDIO_DRAFT_KEY, JSON.stringify(draft));
+          writeStudioDraftRaw(JSON.stringify(draft));
         }
         setLastReelJobId(jobId);
         void fetch(`/api/reels/${encodeURIComponent(jobId)}/session`, {
@@ -553,7 +559,8 @@ export function StudioApp() {
 
   const uploadSource = async (files: FileList | null) => {
     if (!files?.[0]) return;
-    setBusy("Загрузка видео");
+    setBusy(BUSY_UPLOAD_VIDEO);
+    pushLog(`Загрузка видео: ${files[0].name}…`);
     try {
       const fd = new FormData();
       fd.set("jobId", jobId);
@@ -602,6 +609,7 @@ export function StudioApp() {
         pushLog("Озвучка наложена");
       }},
       { pct: 75, fn: async () => {
+        pushLog("Субтитры: распознавание речи → captions.srt (часто 30 с — несколько минут)…");
         const res = await fetch("/api/generate-subtitles", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -612,6 +620,7 @@ export function StudioApp() {
         pushLog("Субтитры SRT готовы");
       }},
       { pct: 100, fn: async () => {
+        pushLog("ffmpeg: прожиг субтитров в видео (время ≈ длина ролика)…");
         const res = await fetch("/api/burn-subtitles", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -656,6 +665,7 @@ export function StudioApp() {
       {
         pct: 65,
         fn: async () => {
+          pushLog("Шаг 2/3: распознавание речи → captions.srt (часто 30 с — несколько минут)…");
           const res = await fetch("/api/generate-subtitles", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -669,6 +679,7 @@ export function StudioApp() {
       {
         pct: 100,
         fn: async () => {
+          pushLog("Шаг 3/3: ffmpeg — прожиг субтитров (время обычно сопоставимо с длиной ролика)…");
           const res = await fetch("/api/burn-subtitles", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -694,9 +705,10 @@ export function StudioApp() {
     }
   };
 
-  const preventDragDefaults = (e: DragEvent) => {
+  /** preventDefault на dragover обязателен, иначе браузер не даст drop. Без stopPropagation — дроп стабильнее. */
+  const allowFileDrop = (e: DragEvent) => {
     e.preventDefault();
-    e.stopPropagation();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
   };
 
   const updateSceneText = (id: number, narration: string) => {
@@ -739,6 +751,8 @@ export function StudioApp() {
 
   const dropZoneClass =
     "flex w-full flex-col items-center gap-2 rounded-xl border border-dashed border-slate-200 bg-white/40 py-10 transition duration-300 hover:border-violet-300 hover:shadow-[0_0_36px_-12px_rgba(124,58,237,0.15)]";
+  const dropZoneUploadingClass =
+    "border-violet-300 bg-violet-50/60 shadow-[0_0_28px_-8px_rgba(124,58,237,0.25)]";
 
   return (
     <>
@@ -769,10 +783,10 @@ export function StudioApp() {
           <h1 className="max-w-2xl text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
             Контент-ассистент
           </h1>
-          <p className="max-w-xl text-sm leading-relaxed text-slate-600">
+          <p className="mx-auto max-w-2xl text-pretty text-sm leading-relaxed text-slate-600">
             Один шаг на экране: сценарий с ИИ, озвучка, ffmpeg и субтитры — в светлых карточках без лишнего шума.
-            Сессия каждого рилса пишется на сервер (можно вернуться позже), плюс черновик в этом браузере. Прямая
-            ссылка: <span className="font-mono text-xs">?reel=ваш-jobId</span>.
+            Сессия каждого рилса пишется на сервер (можно вернуться позже), плюс черновик в этой вкладке (новая вкладка
+            — новая задача с нуля). Прямая ссылка: <span className="font-mono text-xs">?reel=ваш-jobId</span>.
           </p>
         </header>
 
@@ -794,7 +808,7 @@ export function StudioApp() {
         <div
           className={cn(
             "col-span-12 w-full",
-            screen === "pick" ? "mx-auto max-w-xl sm:max-w-2xl" : "lg:col-span-8",
+            screen === "pick" ? "mx-auto w-full max-w-6xl" : "lg:col-span-8",
           )}
         >
           <AnimatePresence mode="wait">
@@ -815,11 +829,11 @@ export function StudioApp() {
                         description="Выберите поток — дальше по одному шагу в фокусе."
                       />
                     </CardHeader>
-                    <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                    <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
                       <motion.div whileHover={{ y: -2 }} transition={{ duration: 0.2 }}>
                         <Button
                           variant="secondary"
-                          className="h-full min-h-[140px] w-full flex-col items-stretch justify-between gap-4 rounded-xl border border-slate-200/90 bg-white/70 p-5 text-left shadow-sm backdrop-blur-xl transition hover:border-violet-200 hover:shadow-[0_16px_40px_-16px_rgba(124,58,237,0.2)]"
+                          className="h-auto min-h-[128px] w-full flex-col items-stretch justify-between gap-3 rounded-xl border border-slate-200/90 bg-white/70 p-4 text-left shadow-sm backdrop-blur-xl transition hover:border-violet-200 hover:shadow-[0_16px_40px_-16px_rgba(124,58,237,0.2)] sm:min-h-[136px] sm:p-5"
                           onClick={() => {
                             router.replace("/", { scroll: false });
                             setJobId(nanoid(10));
@@ -838,17 +852,17 @@ export function StudioApp() {
                             <span className="block text-base font-medium tracking-tight text-slate-900">
                               Новый ролик
                             </span>
-                            <span className="mt-1 block text-xs font-normal text-slate-500">
-                              Тема → сценарий → озвучка → сцены → финал
+                            <span className="mt-1 block text-xs font-normal leading-snug text-pretty text-slate-500">
+                              Тема, сценарий, озвучка, сцены и финал в один поток
                             </span>
                           </span>
-                          <ChevronRight className="ml-auto h-4 w-4 text-slate-400" />
+                          <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-slate-400" />
                         </Button>
                       </motion.div>
                       <motion.div whileHover={{ y: -2 }} transition={{ duration: 0.2 }}>
                         <Button
                           variant="secondary"
-                          className="h-full min-h-[140px] w-full flex-col items-stretch justify-between gap-4 rounded-xl border border-slate-200/90 bg-white/70 p-5 text-left shadow-sm backdrop-blur-xl transition hover:border-fuchsia-200 hover:shadow-[0_16px_40px_-16px_rgba(192,38,211,0.18)]"
+                          className="h-auto min-h-[128px] w-full flex-col items-stretch justify-between gap-3 rounded-xl border border-slate-200/90 bg-white/70 p-4 text-left shadow-sm backdrop-blur-xl transition hover:border-fuchsia-200 hover:shadow-[0_16px_40px_-16px_rgba(192,38,211,0.18)] sm:min-h-[136px] sm:p-5"
                           onClick={() => {
                             router.replace("/", { scroll: false });
                             setJobId(nanoid(10));
@@ -866,17 +880,17 @@ export function StudioApp() {
                             <span className="block text-base font-medium tracking-tight text-slate-900">
                               Адаптировать ролик
                             </span>
-                            <span className="mt-1 block text-xs font-normal text-slate-500">
-                              Загрузка → звук и текст → новый сценарий → финал
+                            <span className="mt-1 block text-xs font-normal leading-snug text-pretty text-slate-500">
+                              Видео, звук и текст, новый сценарий под вас и финал
                             </span>
                           </span>
-                          <ChevronRight className="ml-auto h-4 w-4 text-slate-400" />
+                          <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-slate-400" />
                         </Button>
                       </motion.div>
                       <motion.div whileHover={{ y: -2 }} transition={{ duration: 0.2 }}>
                         <Button
                           variant="secondary"
-                          className="h-full min-h-[140px] w-full flex-col items-stretch justify-between gap-4 rounded-xl border border-slate-200/90 bg-white/70 p-5 text-left shadow-sm backdrop-blur-xl transition hover:border-sky-200 hover:shadow-[0_16px_40px_-16px_rgba(14,165,233,0.18)] sm:col-span-2 xl:col-span-1"
+                          className="h-auto min-h-[128px] w-full flex-col items-stretch justify-between gap-3 rounded-xl border border-slate-200/90 bg-white/70 p-4 text-left shadow-sm backdrop-blur-xl transition hover:border-sky-200 hover:shadow-[0_16px_40px_-16px_rgba(14,165,233,0.18)] sm:min-h-[136px] sm:p-5"
                           onClick={() => {
                             router.replace("/", { scroll: false });
                             setJobId(nanoid(10));
@@ -895,11 +909,11 @@ export function StudioApp() {
                             <span className="block text-base font-medium tracking-tight text-slate-900">
                               Только субтитры
                             </span>
-                            <span className="mt-1 block text-xs font-normal text-slate-500">
-                              Загрузите готовое видео — на выходе то же видео с прожжёнными субтитрами
+                            <span className="mt-1 block text-xs font-normal leading-snug text-pretty text-slate-500">
+                              То же видео с субтитрами в кадре, без сценария и монтажа
                             </span>
                           </span>
-                          <ChevronRight className="ml-auto h-4 w-4 text-slate-400" />
+                          <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-slate-400" />
                         </Button>
                       </motion.div>
                     </CardContent>
@@ -910,7 +924,7 @@ export function StudioApp() {
                       <StepHeader
                         icon={History}
                         title="Ваши рилсы"
-                        description="Все задачи с сервера: откройте любую — тот же сценарий, шаг и jobId. Можно править и снова гнать пайплайн."
+                        description="Задачи на сервере: откройте по jobId — тот же шаг и черновик. Можно править и снова гнать пайплайн."
                       />
                     </CardHeader>
                     <CardContent className="space-y-3">
@@ -1068,20 +1082,35 @@ export function StudioApp() {
                     />
                     <button
                       type="button"
-                      onClick={() => sourceInputRef.current?.click()}
-                      onDragEnter={preventDragDefaults}
-                      onDragOver={preventDragDefaults}
+                      onClick={() => !uploadingVideo && sourceInputRef.current?.click()}
+                      onDragEnter={allowFileDrop}
+                      onDragOver={allowFileDrop}
                       onDrop={(e) => {
-                        preventDragDefaults(e);
-                        uploadSource(e.dataTransfer.files);
+                        e.preventDefault();
+                        if (!uploadingVideo) uploadSource(e.dataTransfer.files);
                       }}
-                      className={dropZoneClass}
+                      aria-busy={uploadingVideo}
+                      className={cn(
+                        dropZoneClass,
+                        uploadingVideo && dropZoneUploadingClass,
+                        uploadingVideo && "cursor-wait pointer-events-none",
+                      )}
                     >
-                      <Upload className="h-8 w-8 text-slate-400" />
-                      <span className="text-sm text-slate-600">Перетащите или нажмите</span>
-                      {sourceReady ? (
-                        <span className="text-xs text-emerald-400/90">Файл принят</span>
-                      ) : null}
+                      <span className="pointer-events-none flex w-full flex-col items-center gap-2">
+                        {uploadingVideo ? (
+                          <Loader2 className="h-8 w-8 animate-spin text-violet-500" />
+                        ) : (
+                          <Upload className="h-8 w-8 text-slate-400" />
+                        )}
+                        <span className="max-w-[90%] text-center text-sm text-slate-600">
+                          {uploadingVideo
+                            ? "Загружаем видео на сервер… Это может занять минуту для больших файлов."
+                            : "Перетащите или нажмите"}
+                        </span>
+                        {sourceReady && !uploadingVideo ? (
+                          <span className="text-xs text-emerald-600/90">Файл принят</span>
+                        ) : null}
+                      </span>
                     </button>
                     <Button
                       variant="gloss"
@@ -1089,8 +1118,17 @@ export function StudioApp() {
                       disabled={!sourceReady || !!busy}
                       onClick={() => setScreen("adapt_transcribe")}
                     >
-                      Далее
-                      <ChevronRight className="h-4 w-4" />
+                      {uploadingVideo ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Загрузка видео…
+                        </>
+                      ) : (
+                        <>
+                          Далее
+                          <ChevronRight className="h-4 w-4" />
+                        </>
+                      )}
                     </Button>
                   </CardContent>
                 </Card>
@@ -1115,20 +1153,35 @@ export function StudioApp() {
                     />
                     <button
                       type="button"
-                      onClick={() => sourceInputRef.current?.click()}
-                      onDragEnter={preventDragDefaults}
-                      onDragOver={preventDragDefaults}
+                      onClick={() => !uploadingVideo && sourceInputRef.current?.click()}
+                      onDragEnter={allowFileDrop}
+                      onDragOver={allowFileDrop}
                       onDrop={(e) => {
-                        preventDragDefaults(e);
-                        uploadSource(e.dataTransfer.files);
+                        e.preventDefault();
+                        if (!uploadingVideo) uploadSource(e.dataTransfer.files);
                       }}
-                      className={dropZoneClass}
+                      aria-busy={uploadingVideo}
+                      className={cn(
+                        dropZoneClass,
+                        uploadingVideo && dropZoneUploadingClass,
+                        uploadingVideo && "cursor-wait pointer-events-none",
+                      )}
                     >
-                      <Upload className="h-8 w-8 text-slate-400" />
-                      <span className="text-sm text-slate-600">Перетащите MP4 / MOV или нажмите</span>
-                      {sourceReady ? (
-                        <span className="text-xs text-emerald-400/90">Файл принят</span>
-                      ) : null}
+                      <span className="pointer-events-none flex w-full flex-col items-center gap-2">
+                        {uploadingVideo ? (
+                          <Loader2 className="h-8 w-8 animate-spin text-violet-500" />
+                        ) : (
+                          <Upload className="h-8 w-8 text-slate-400" />
+                        )}
+                        <span className="max-w-[90%] text-center text-sm text-slate-600">
+                          {uploadingVideo
+                            ? "Загружаем видео на сервер… Подождите, пока не появится «Файл принят»."
+                            : "Перетащите MP4 / MOV или нажмите"}
+                        </span>
+                        {sourceReady && !uploadingVideo ? (
+                          <span className="text-xs text-emerald-600/90">Файл принят</span>
+                        ) : null}
+                      </span>
                     </button>
                     <Button
                       variant="gloss"
@@ -1136,8 +1189,17 @@ export function StudioApp() {
                       disabled={!sourceReady || !!busy}
                       onClick={() => setScreen("subs_burn")}
                     >
-                      Далее: субтитры
-                      <ChevronRight className="h-4 w-4" />
+                      {uploadingVideo ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Загрузка видео…
+                        </>
+                      ) : (
+                        <>
+                          Далее: субтитры
+                          <ChevronRight className="h-4 w-4" />
+                        </>
+                      )}
                     </Button>
                   </CardContent>
                 </Card>
@@ -1256,19 +1318,21 @@ export function StudioApp() {
                     <button
                       type="button"
                       onClick={() => scenesInputRef.current?.click()}
-                      onDragEnter={preventDragDefaults}
-                      onDragOver={preventDragDefaults}
+                      onDragEnter={allowFileDrop}
+                      onDragOver={allowFileDrop}
                       onDrop={(e) => {
-                        preventDragDefaults(e);
+                        e.preventDefault();
                         uploadScenes(e.dataTransfer.files);
                       }}
                       className={cn(dropZoneClass, "py-12")}
                     >
-                      <Upload className="h-8 w-8 text-slate-400" />
-                      <span className="text-sm text-slate-600">
-                        {sceneFileNames.length
-                          ? `${sceneFileNames.length} файл(ов)`
-                          : "Загрузите картинки или видео по сценам"}
+                      <span className="pointer-events-none flex w-full flex-col items-center gap-2">
+                        <Upload className="h-8 w-8 text-slate-400" />
+                        <span className="text-sm text-slate-600">
+                          {sceneFileNames.length
+                            ? `${sceneFileNames.length} файл(ов)`
+                            : "Загрузите картинки или видео по сценам"}
+                        </span>
                       </span>
                     </button>
                     <Button

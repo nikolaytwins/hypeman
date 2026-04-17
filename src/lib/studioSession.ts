@@ -77,8 +77,35 @@ export function isValidJobId(id: string): boolean {
   return /^[a-zA-Z0-9_-]{6,48}$/.test(id);
 }
 
+/** Черновик UI: в sessionStorage — отдельная задача в каждой вкладке (параллельные сессии). */
+export function readStudioDraftRaw(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const s = sessionStorage.getItem(STUDIO_DRAFT_KEY);
+    if (s) return s;
+    const legacy = localStorage.getItem(STUDIO_DRAFT_KEY);
+    if (legacy) {
+      sessionStorage.setItem(STUDIO_DRAFT_KEY, legacy);
+      localStorage.removeItem(STUDIO_DRAFT_KEY);
+      return legacy;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+export function writeStudioDraftRaw(json: string): void {
+  try {
+    sessionStorage.setItem(STUDIO_DRAFT_KEY, json);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function clearStudioDraft() {
   try {
+    sessionStorage.removeItem(STUDIO_DRAFT_KEY);
     localStorage.removeItem(STUDIO_DRAFT_KEY);
   } catch {
     /* ignore */
@@ -187,7 +214,7 @@ export function parseStudioDraftBody(body: unknown): StudioDraftV1 | null {
   };
 }
 
-/** Нормализация черновика из localStorage / API в состояние экрана. */
+/** Нормализация черновика из sessionStorage / API в состояние экрана. */
 export function snapshotFromDraft(d: Partial<StudioDraftV1>): StudioStateSnapshot | null {
   if (d.v !== 1 || typeof d.jobId !== "string" || !d.jobId || !draftHasWork(d)) return null;
   const hasScript =
