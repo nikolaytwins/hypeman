@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { createLogger } from "@/lib/logger";
-import { SESSION_FILE, isValidJobId, type ReelListItem } from "@/lib/studioSession";
+import { SESSION_FILE, isValidJobId, readSessionListFields, type ReelListItem } from "@/lib/studioSession";
 import { ensureStorageDirs, jobOutputDir } from "@/lib/paths";
 
 export const runtime = "nodejs";
@@ -39,11 +39,20 @@ export async function GET() {
 
       try {
         const raw = await fs.readFile(sessionPath, "utf8");
-        const s = JSON.parse(raw) as { script?: { title?: string }; savedAt?: number };
+        const s = JSON.parse(raw) as unknown;
+        const meta = readSessionListFields(s);
         hasSession = true;
-        if (typeof s.script?.title === "string" && s.script.title.trim()) title = s.script.title.trim();
-        if (typeof s.savedAt === "number") updated = Math.max(updated, s.savedAt);
-        items.push({ jobId, title, updatedAt: updated, hasSession });
+        if (meta.title?.trim()) title = meta.title.trim();
+        if (typeof meta.savedAt === "number") updated = Math.max(updated, meta.savedAt);
+        items.push({
+          jobId,
+          title,
+          updatedAt: updated,
+          hasSession,
+          screen: meta.screen,
+          savedAt: meta.savedAt,
+          renderProgress: meta.renderProgress,
+        });
         continue;
       } catch {
         /* no session */

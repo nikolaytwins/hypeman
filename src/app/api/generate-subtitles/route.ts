@@ -11,12 +11,14 @@ const log = createLogger("api/generate-subtitles");
 export async function POST(req: Request) {
   try {
     await ensureStorageDirs();
-    const body = (await req.json()) as { jobId: string };
+    const body = (await req.json()) as { jobId: string; audioFileName?: string };
     if (!body.jobId) {
       return NextResponse.json({ error: "Нужен jobId" }, { status: 400 });
     }
     await ensureJobDirs(body.jobId);
-    const srt = await generateSubtitles(body.jobId);
+    const srt = await generateSubtitles(body.jobId, {
+      audioFileName: body.audioFileName,
+    });
     log.info("ok", { srt });
     return NextResponse.json({ srtPath: srt });
   } catch (e) {

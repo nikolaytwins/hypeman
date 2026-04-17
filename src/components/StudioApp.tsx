@@ -80,6 +80,44 @@ function formatReelDate(ms: number) {
   return new Date(ms).toLocaleString("ru-RU", { dateStyle: "short", timeStyle: "short" });
 }
 
+/** Грубая оценка «сколько ещё» по шагу (параллельные вкладки / трей). */
+const STAGE_ETA_BASE_SEC: Record<Screen, number> = {
+  pick: 0,
+  new_topic: 30,
+  new_script: 40,
+  adapt_upload: 20,
+  adapt_transcribe: 120,
+  adapt_rewrite: 45,
+  subs_upload: 20,
+  subs_burn: 150,
+  voice: 90,
+  scenes: 35,
+  render: 200,
+  done: 0,
+};
+
+function formatRoughEta(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 8) return "≈ сейчас";
+  if (seconds < 70) return `≈ ${Math.round(seconds / 5) * 5} с`;
+  return `≈ ${Math.max(1, Math.round(seconds / 60))} мин`;
+}
+
+function reelRoughEta(r: ReelListItem): string {
+  const sc = r.screen;
+  if (!sc) return "шаг неизвестен";
+  if (sc === "render" && typeof r.renderProgress === "number" && r.renderProgress > 0) {
+    const base = STAGE_ETA_BASE_SEC.render;
+    const left = Math.max(25, base * (1 - r.renderProgress / 100));
+    return formatRoughEta(left);
+  }
+  if (sc === "subs_burn" && typeof r.renderProgress === "number" && r.renderProgress > 0) {
+    const base = STAGE_ETA_BASE_SEC.subs_burn;
+    const left = Math.max(20, base * (1 - r.renderProgress / 100));
+    return formatRoughEta(left);
+  }
+  return formatRoughEta(STAGE_ETA_BASE_SEC[sc] ?? 45);
+}
+
 function StepHeader({
   icon: Icon,
   title,
@@ -127,6 +165,8 @@ export function StudioApp() {
 
   const [reels, setReels] = useState<ReelListItem[]>([]);
   const [reelsLoading, setReelsLoading] = useState(false);
+
+  const otherReels = useMemo(() => reels.filter((r) => r.jobId !== jobId).slice(0, 6), [reels, jobId]);
 
   const pushLog = useCallback((msg: string, level: LogEntry["level"] = "info") => {
     setLogs((prev) => [...prev.slice(-60), { t: formatTime(), level, msg }]);
@@ -238,6 +278,26 @@ export function StudioApp() {
   }, [screen]);
 
   useEffect(() => {
+    if (screen === "pick") return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const r = await fetch("/api/reels");
+        const d = await r.json();
+        if (!cancelled && r.ok && Array.isArray(d.reels)) setReels(d.reels);
+      } catch {
+        /* ignore */
+      }
+    };
+    void load();
+    const id = window.setInterval(load, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [screen]);
+
+  useEffect(() => {
     if (!studioHydrated) return;
     if (screen === "done") {
       clearStudioDraft();
@@ -325,6 +385,13 @@ export function StudioApp() {
         setScreen("pick");
         setOrigin(null);
         break;
+      case "subs_upload":
+        setScreen("pick");
+        setOrigin(null);
+        break;
+      case "subs_burn":
+        setScreen("subs_upload");
+        break;
       case "adapt_transcribe":
         setScreen("adapt_upload");
         break;
@@ -342,7 +409,7 @@ export function StudioApp() {
         break;
       case "done":
         setRenderProgress(0);
-        setScreen("render");
+        setScreen(origin === "subs" ? "subs_burn" : "render");
         break;
       default:
         break;
@@ -352,7 +419,8 @@ export function StudioApp() {
   const canGoBack =
     screen !== "pick" &&
     screen !== "done" &&
-    !(screen === "render" && renderProgress > 0 && busy);
+    !(screen === "render" && renderProgress > 0 && busy) &&
+    !(screen === "subs_burn" && renderProgress > 0 && busy);
 
   const stepProgress = useMemo(() => {
     if (screen === "new_script" && origin === "adapt") return 40;
@@ -363,6 +431,8 @@ export function StudioApp() {
       adapt_upload: 12,
       adapt_transcribe: 22,
       adapt_rewrite: 32,
+      subs_upload: 14,
+      subs_burn: 88,
       voice: 50,
       scenes: 72,
       render: 88,
@@ -492,6 +562,9 @@ export function StudioApp() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? ERR_UPLOAD);
       setSourceReady(true);
+      if (origin === "subs" && files[0]?.name) {
+        setTopic(`Субтитры · ${files[0].name}`);
+      }
       pushLog("Исходное видео сохранено");
     } catch (e) {
       fail(e);
@@ -563,6 +636,64 @@ export function StudioApp() {
     }
   };
 
+  const runSubsOnlyPipeline = async () => {
+    setBusy("Субтитры");
+    setRenderProgress(8);
+    const steps = [
+      {
+        pct: 30,
+        fn: async () => {
+          const res = await fetch("/api/extract-audio", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobId }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
+          pushLog("Аудио извлечено (extracted.mp3)");
+        },
+      },
+      {
+        pct: 65,
+        fn: async () => {
+          const res = await fetch("/api/generate-subtitles", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobId, audioFileName: "extracted.mp3" }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
+          pushLog("SRT по дорожке видео готов");
+        },
+      },
+      {
+        pct: 100,
+        fn: async () => {
+          const res = await fetch("/api/burn-subtitles", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobId, videoSource: "input" }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
+          pushLog("Субтитры прожжены в исходное видео → final.mp4");
+        },
+      },
+    ];
+    try {
+      pushLog("Режим: только субтитры на исходный ролик…");
+      for (const s of steps) {
+        await s.fn();
+        setRenderProgress(s.pct);
+      }
+      setScreen("done");
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const preventDragDefaults = (e: DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -598,6 +729,8 @@ export function StudioApp() {
     adapt_upload: "Исходный ролик",
     adapt_transcribe: "Аудио и текст",
     adapt_rewrite: "Адаптация",
+    subs_upload: "Видео для субтитров",
+    subs_burn: "Субтитры",
     voice: "Озвучка",
     scenes: "Видеосцены",
     render: "Сборка",
@@ -608,7 +741,13 @@ export function StudioApp() {
     "flex w-full flex-col items-center gap-2 rounded-xl border border-dashed border-slate-200 bg-white/40 py-10 transition duration-300 hover:border-violet-300 hover:shadow-[0_0_36px_-12px_rgba(124,58,237,0.15)]";
 
   return (
-    <div className="relative z-10 mx-auto min-h-full w-full max-w-6xl px-4 py-8 sm:px-6 lg:px-10 lg:py-12">
+    <>
+    <div
+      className={cn(
+        "relative z-10 mx-auto min-h-full w-full max-w-6xl px-4 py-8 sm:px-6 lg:px-10 lg:py-12",
+        screen !== "pick" && otherReels.length > 0 && "pb-28",
+      )}
+    >
       <div className="grid grid-cols-12 gap-4 lg:gap-5">
         <header
           className={cn(
@@ -676,7 +815,7 @@ export function StudioApp() {
                         description="Выберите поток — дальше по одному шагу в фокусе."
                       />
                     </CardHeader>
-                    <CardContent className="grid gap-4 sm:grid-cols-2">
+                    <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                       <motion.div whileHover={{ y: -2 }} transition={{ duration: 0.2 }}>
                         <Button
                           variant="secondary"
@@ -734,6 +873,35 @@ export function StudioApp() {
                           <ChevronRight className="ml-auto h-4 w-4 text-slate-400" />
                         </Button>
                       </motion.div>
+                      <motion.div whileHover={{ y: -2 }} transition={{ duration: 0.2 }}>
+                        <Button
+                          variant="secondary"
+                          className="h-full min-h-[140px] w-full flex-col items-stretch justify-between gap-4 rounded-xl border border-slate-200/90 bg-white/70 p-5 text-left shadow-sm backdrop-blur-xl transition hover:border-sky-200 hover:shadow-[0_16px_40px_-16px_rgba(14,165,233,0.18)] sm:col-span-2 xl:col-span-1"
+                          onClick={() => {
+                            router.replace("/", { scroll: false });
+                            setJobId(nanoid(10));
+                            setOrigin("subs");
+                            setScript(null);
+                            setTranscript("");
+                            setSceneFileNames([]);
+                            setSourceReady(false);
+                            setTopic("");
+                            setRenderProgress(0);
+                            setScreen("subs_upload");
+                          }}
+                        >
+                          <Captions className="h-6 w-6 text-sky-600" />
+                          <span>
+                            <span className="block text-base font-medium tracking-tight text-slate-900">
+                              Только субтитры
+                            </span>
+                            <span className="mt-1 block text-xs font-normal text-slate-500">
+                              Загрузите готовое видео — на выходе то же видео с прожжёнными субтитрами
+                            </span>
+                          </span>
+                          <ChevronRight className="ml-auto h-4 w-4 text-slate-400" />
+                        </Button>
+                      </motion.div>
                     </CardContent>
                   </Card>
 
@@ -767,6 +935,13 @@ export function StudioApp() {
                                 <p className="text-[11px] text-slate-500">
                                   {formatReelDate(r.updatedAt)}
                                   {!r.hasSession ? " · только файл сценария" : ""}
+                                  {r.screen ? (
+                                    <>
+                                      {" · "}
+                                      {screenTitle[r.screen]}
+                                      <span className="text-slate-400"> ({reelRoughEta(r)})</span>
+                                    </>
+                                  ) : null}
                                 </p>
                               </div>
                               <Button
@@ -921,6 +1096,74 @@ export function StudioApp() {
                 </Card>
               ) : null}
 
+              {screen === "subs_upload" ? (
+                <Card>
+                  <CardHeader>
+                    <StepHeader
+                      icon={Captions}
+                      title="Шаг 1 · Видео"
+                      description="Ролик без субтитров: расшифруем речь с дорожки и прожжём текст в кадр. Картинка и звук останутся как в исходнике."
+                    />
+                  </CardHeader>
+                  <CardContent className="space-y-5">
+                    <input
+                      ref={sourceInputRef}
+                      type="file"
+                      accept="video/*"
+                      className="hidden"
+                      onChange={(e) => uploadSource(e.target.files)}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => sourceInputRef.current?.click()}
+                      onDragEnter={preventDragDefaults}
+                      onDragOver={preventDragDefaults}
+                      onDrop={(e) => {
+                        preventDragDefaults(e);
+                        uploadSource(e.dataTransfer.files);
+                      }}
+                      className={dropZoneClass}
+                    >
+                      <Upload className="h-8 w-8 text-slate-400" />
+                      <span className="text-sm text-slate-600">Перетащите MP4 / MOV или нажмите</span>
+                      {sourceReady ? (
+                        <span className="text-xs text-emerald-400/90">Файл принят</span>
+                      ) : null}
+                    </button>
+                    <Button
+                      variant="gloss"
+                      className="w-full"
+                      disabled={!sourceReady || !!busy}
+                      onClick={() => setScreen("subs_burn")}
+                    >
+                      Далее: субтитры
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : null}
+
+              {screen === "subs_burn" ? (
+                <Card>
+                  <CardHeader>
+                    <StepHeader
+                      icon={Subtitles}
+                      title="Шаг 2 · Прожиг"
+                      description="Извлечение аудио → Whisper / синхронный SRT → наложение на ваш файл. Результат: final.mp4 в этой задаче."
+                    />
+                  </CardHeader>
+                  <CardContent className="space-y-5">
+                    {renderProgress > 0 && renderProgress < 100 ? (
+                      <Progress value={renderProgress} />
+                    ) : null}
+                    <Button variant="gloss" className="w-full" disabled={!sourceReady || !!busy} onClick={runSubsOnlyPipeline}>
+                      {busy ? <Loader2 className="animate-spin" /> : <Subtitles className="h-4 w-4" />}
+                      Сделать субтитры и сохранить
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : null}
+
               {screen === "adapt_transcribe" ? (
                 <Card>
                   <CardHeader>
@@ -1066,7 +1309,15 @@ export function StudioApp() {
               {screen === "done" ? (
                 <Card>
                   <CardHeader>
-                    <StepHeader icon={PartyPopper} title="Готово" description="Файл в папке output этой задачи." />
+                    <StepHeader
+                      icon={PartyPopper}
+                      title="Готово"
+                      description={
+                        origin === "subs"
+                          ? "Исходное видео с прожжёнными субтитрами — final.mp4 в папке output этой задачи."
+                          : "Файл в папке output этой задачи."
+                      }
+                    />
                   </CardHeader>
                   <CardContent className="flex flex-col gap-3">
                     <Button variant="gloss" asChild>
@@ -1136,5 +1387,43 @@ export function StudioApp() {
         </DialogContent>
       </Dialog>
     </div>
+
+    {screen !== "pick" && otherReels.length > 0 ? (
+      <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 px-3 pb-3 sm:px-6">
+        <div className="pointer-events-auto mx-auto max-w-3xl rounded-xl border border-slate-200/90 bg-white/95 p-3 shadow-lg shadow-slate-900/10 backdrop-blur-md">
+          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+            Другие задачи на сервере
+          </p>
+          <ul className="max-h-[min(28vh,200px)] space-y-2 overflow-y-auto">
+            {otherReels.map((r) => (
+              <li
+                key={r.jobId}
+                className="flex flex-col gap-2 rounded-lg border border-slate-100 bg-slate-50/80 px-2.5 py-2 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs font-medium text-slate-900">{r.title}</p>
+                  <p className="font-mono text-[9px] text-slate-400">{r.jobId}</p>
+                  <p className="text-[10px] text-slate-500">
+                    {r.screen ? screenTitle[r.screen] : "Шаг неизвестен"}
+                    <span className="text-slate-400"> · {reelRoughEta(r)}</span>
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="h-8 shrink-0 text-xs"
+                  disabled={!!busy}
+                  onClick={() => void openReelByJobId(r.jobId)}
+                >
+                  Открыть
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    ) : null}
+    </>
   );
 }

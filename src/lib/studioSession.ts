@@ -1,6 +1,6 @@
 import type { ScriptPayload } from "@/lib/pipeline/types";
 
-export type Origin = "new" | "adapt";
+export type Origin = "new" | "adapt" | "subs";
 
 export type Screen =
   | "pick"
@@ -9,6 +9,8 @@ export type Screen =
   | "adapt_upload"
   | "adapt_transcribe"
   | "adapt_rewrite"
+  | "subs_upload"
+  | "subs_burn"
   | "voice"
   | "scenes"
   | "render"
@@ -26,6 +28,8 @@ const ALL_SCREENS: Screen[] = [
   "adapt_upload",
   "adapt_transcribe",
   "adapt_rewrite",
+  "subs_upload",
+  "subs_burn",
   "voice",
   "scenes",
   "render",
@@ -37,6 +41,10 @@ export type ReelListItem = {
   title: string;
   updatedAt: number;
   hasSession: boolean;
+  /** Из studio-session.json — шаг пайплайна. */
+  screen?: Screen;
+  savedAt?: number;
+  renderProgress?: number;
 };
 
 export type StudioDraftV1 = {
@@ -93,7 +101,7 @@ export function coerceScreen(value: unknown, hasScript: boolean): Screen {
 }
 
 export function coerceOrigin(value: unknown): Origin | null {
-  if (value === "new" || value === "adapt") return value;
+  if (value === "new" || value === "adapt" || value === "subs") return value;
   return null;
 }
 
@@ -107,6 +115,8 @@ export function draftHasWork(d: Partial<StudioDraftV1>): boolean {
     screen === "adapt_upload" ||
     screen === "adapt_transcribe" ||
     screen === "adapt_rewrite" ||
+    screen === "subs_upload" ||
+    screen === "subs_burn" ||
     screen === "voice" ||
     screen === "scenes" ||
     screen === "render";
@@ -121,12 +131,36 @@ export function draftHasWork(d: Partial<StudioDraftV1>): boolean {
   );
 }
 
-function scriptFromUnknown(raw: unknown): ScriptPayload | null {
+export function scriptFromUnknown(raw: unknown): ScriptPayload | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as ScriptPayload;
   if (!Array.isArray(o.scenes) || !o.scenes.length) return null;
   const ok = o.scenes.every((s) => s && typeof s.id === "number" && typeof s.narration === "string");
   return ok ? o : null;
+}
+
+/** Поля списка рилсов из JSON сессии (без полной валидации черновика). */
+export function readSessionListFields(raw: unknown): {
+  title?: string;
+  screen?: Screen;
+  savedAt?: number;
+  renderProgress?: number;
+} {
+  if (!raw || typeof raw !== "object") return {};
+  const o = raw as Record<string, unknown>;
+  const script = scriptFromUnknown(o.script);
+  const rawScript = o.script;
+  let title: string | undefined = script?.title?.trim();
+  if (!title && rawScript && typeof rawScript === "object" && "title" in rawScript) {
+    const t = (rawScript as { title?: unknown }).title;
+    if (typeof t === "string" && t.trim()) title = t.trim();
+  }
+  const screen = coerceScreen(o.screen, Boolean(script));
+  const savedAt = typeof o.savedAt === "number" ? o.savedAt : undefined;
+  const renderProgress = typeof o.renderProgress === "number" ? o.renderProgress : undefined;
+  const topic = typeof o.topic === "string" ? o.topic.trim() : "";
+  if (!title && topic) title = topic;
+  return { title, screen, savedAt, renderProgress };
 }
 
 /** Разбор тела PUT или файла studio-session.json */
@@ -161,11 +195,17 @@ export function snapshotFromDraft(d: Partial<StudioDraftV1>): StudioStateSnapsho
     d.script!.scenes.every((s) => s && typeof s.id === "number" && typeof s.narration === "string");
   const script = hasScript ? (d.script as ScriptPayload) : null;
   let screen = coerceScreen(d.screen, Boolean(script));
-  if (!script && (screen === "voice" || screen === "scenes" || screen === "render")) {
+  if (
+    !script &&
+    d.origin !== "subs" &&
+    (screen === "voice" || screen === "scenes" || screen === "render")
+  ) {
     screen = "pick";
   }
   if (!script && screen === "new_script") {
-    screen = d.origin === "adapt" ? "adapt_rewrite" : d.topic?.trim() ? "new_topic" : "pick";
+    if (d.origin === "adapt") screen = "adapt_rewrite";
+    else if (d.origin === "subs") screen = d.sourceReady ? "subs_burn" : "subs_upload";
+    else screen = d.topic?.trim() ? "new_topic" : "pick";
   }
   return {
     jobId: d.jobId,

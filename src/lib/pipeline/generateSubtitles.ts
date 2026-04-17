@@ -8,6 +8,7 @@ import {
   shouldUseOpenRouterTranscription,
   transcribeWithOpenRouter,
 } from "@/lib/openrouter/audioTranscribe";
+import { buildSyncedSrtFromAudio } from "@/lib/pipeline/wordTimedSubtitles";
 
 const log = createLogger("generate_subtitles");
 
@@ -20,16 +21,39 @@ function getOpenAI(): OpenAI {
   });
 }
 
-export async function generateSubtitles(jobId: string): Promise<string> {
-  const audioPath = path.join(jobAudioDir(jobId), "voice.mp3");
+export async function generateSubtitles(
+  jobId: string,
+  options?: { audioFileName?: string },
+): Promise<string> {
+  const audioFileName = options?.audioFileName ?? "voice.mp3";
+  const audioPath = path.join(jobAudioDir(jobId), audioFileName);
   const exists = await fs
     .access(audioPath)
     .then(() => true)
     .catch(() => false);
   if (!exists) {
-    throw new Error("Нет voice.mp3 — сначала сгенерируйте озвучку");
+    if (audioFileName === "voice.mp3") {
+      throw new Error("Нет voice.mp3 — сначала сгенерируйте озвучку");
+    }
+    throw new Error(`Нет аудио ${audioFileName} — сначала извлеките дорожку из видео`);
   }
   const srtPath = path.join(jobOutputDir(jobId), "captions.srt");
+
+  try {
+    const synced = await buildSyncedSrtFromAudio(audioPath);
+    if (synced.trim()) {
+      await fs.writeFile(srtPath, synced, "utf8");
+      log.info("saved_synced", { srtPath, bytes: Buffer.byteLength(synced, "utf8") });
+      return srtPath;
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg !== "sync_srt_unavailable") {
+      log.warn("synced_subtitles_failed", { message: msg });
+    } else {
+      log.info("synced_subtitles_skip", { reason: msg });
+    }
+  }
 
   if (shouldUseOpenRouterTranscription()) {
     log.info("openrouter_srt", { audioPath });

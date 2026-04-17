@@ -1,5 +1,6 @@
 import { createLogger } from "@/lib/logger";
 import { completeChat } from "@/lib/openrouter";
+import { IMAGE_DIRECTOR_PROMPT } from "@/lib/prompts/imageDirectorPrompt";
 import { parseScriptJson, type ScriptPayload } from "@/lib/pipeline/types";
 
 const log = createLogger("adapt_script");
@@ -19,7 +20,10 @@ const SYSTEM = `Ты переписываешь вирусные сценари�
 - Сохрани структуру: число сцен и темп как у исходника.
 - Сохрани вирусные приёмы (хук, петли, контраст, CTA), но сделай формулировки уникальными.
 - narration — только озвучка на русском (~5 с на сцену).
-- visualHint — готовый промпт для генератора изображений на английском (subject, lighting, lens, style; без текста в кадре).`;
+- visualHint — готовый промпт для Midjourney на английском строго по правилам ниже (одна строка, без текста в кадре).
+
+--- Правила только для поля visualHint ---
+${IMAGE_DIRECTOR_PROMPT}`;
 
 export async function adaptScript(originalTranscript: string): Promise<ScriptPayload> {
   log.info("start", { chars: originalTranscript.length });
