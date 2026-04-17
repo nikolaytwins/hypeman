@@ -26,6 +26,23 @@ function pickProxyUrl(): string | undefined {
   );
 }
 
+function hintForFetchFailure(detail: string, usingProxy: boolean): string {
+  const d = detail.toLowerCase();
+  if (usingProxy && (d.includes("503") || d.includes("proxy response"))) {
+    return " Прокси ответил 503 на CONNECT до api.elevenlabs.io — это не ElevenLabs и не «не тот SOCKS»: у провайдера перегруз/лимит/блок цели или неверный endpoint. Проверьте кабинет/квоту, напишите в поддержку прокси, попробуйте другой порт/хост из их инструкции.";
+  }
+  if (/407/.test(detail)) {
+    return " Прокси требует авторизацию (407): проверьте логин/пароль в ELEVENLABS_HTTPS_PROXY (http://user:pass@host:port), спецсимволы в URL-кодировании.";
+  }
+  if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN/i.test(detail)) {
+    return " Прокси недоступен с VPS (сеть/firewall) или неверный host/port. Проверка: curl -v -x \"…\" https://api.elevenlabs.io/v1/user -H \"xi-api-key: …\"";
+  }
+  if (usingProxy) {
+    return " Проверьте строку http://user:pass@host:port (HTTP CONNECT). Если провайдер выдал только SOCKS5 — нужен другой HTTP-endpoint или доработка кода.";
+  }
+  return "";
+}
+
 export async function generateVoice(jobId: string, script: ScriptPayload): Promise<string> {
   const apiKey = process.env.ELEVENLABS_API_KEY?.trim();
   const voiceId = process.env.ELEVENLABS_VOICE_ID?.trim();
@@ -109,12 +126,7 @@ export async function generateVoice(jobId: string, script: ScriptPayload): Promi
     }
     const detail = formatFetchError(e);
     log.error("ElevenLabs fetch failed", { detail });
-    let hint =
-      " Проверьте, что прокси — HTTP CONNECT для HTTPS (строка вида http://host:port). Порт вроде 5343 часто бывает SOCKS5, undici ProxyAgent его не поддерживает — нужен HTTP-прокси или другой выход.";
-    if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN/i.test(detail)) {
-      hint =
-        " Прокси недоступен с VPS (сеть/firewall) или неверный host/port. Проверка: curl -v -x \"ВАШ_PROXY\" https://api.elevenlabs.io/v1/user -H \"xi-api-key: …\"";
-    }
+    const hint = hintForFetchFailure(detail, Boolean(proxyUrl));
     throw new Error(`ElevenLabs: ${detail}${hint}`);
   }
 }
