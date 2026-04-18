@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createLogger } from "@/lib/logger";
-import { escapeForSubtitlesFilter, prependHdrToSdrToVideoFilterChain, runFfmpeg } from "@/lib/ffmpeg/exec";
+import { escapeForSubtitlesFilter, FFMPEG_OUTPUT_COLOR_TAGS_BT709, runFfmpeg } from "@/lib/ffmpeg/exec";
 import { jobOutputDir, resolvedSubtitleFontSetup } from "@/lib/paths";
 
 const log = createLogger("burn_subtitles");
@@ -19,27 +19,26 @@ export async function burnSubtitles(
   const fn = sanitizeFontName(fontname);
   const fd = fontsdir ? escapeForSubtitlesFilter(path.resolve(fontsdir)) : "";
   const style = [
-    "FontSize=22",
+    "FontSize=15",
     `FontName=${fn}`,
     "PrimaryColour=&H00FFFFFF",
     "OutlineColour=&H80000000",
     "BorderStyle=1",
-    "Outline=2",
+    "Outline=1",
     "Shadow=0",
     "Alignment=2",
-    "MarginV=56",
+    "MarginV=46",
     "Bold=1",
   ].join(",");
-  const subVf =
+  const vf =
     fd.length > 0
       ? `subtitles='${sub}':fontsdir='${fd}':force_style='${style}'`
       : `subtitles='${sub}':force_style='${style}'`;
-  const vf = prependHdrToSdrToVideoFilterChain(subVf);
 
   log.info("subtitle_font", { fontname: fn, fontsdir: fd || null });
 
   await runFfmpeg(
-    ["-i", options.videoPath, "-vf", vf, "-c:a", "copy", outPath],
+    ["-i", options.videoPath, "-vf", vf, "-c:a", "copy", ...FFMPEG_OUTPUT_COLOR_TAGS_BT709, outPath],
     log,
     { label: "burn_subtitles" },
   );

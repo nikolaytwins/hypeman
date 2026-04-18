@@ -3,17 +3,17 @@ import type { Logger } from "@/lib/logger";
 import { ffmpegNotFoundHint, getFfprobeBinary, getFfmpegBinary } from "@/lib/ffmpeg/binaries";
 
 /**
- * iPhone HDR (HLG, arib-std-b67 / BT.2020) → SDR BT.709 перед scale/libx264/subtitles.
- * Должен быть первым в цепочке `-vf`, до `subtitles=`.
- * Для Dolby Vision (PQ) может понадобиться другой `transferin` (например smpte2084).
+ * Теги цвета выходного потока SDR BT.709 (без vf). Ставить перед именем выходного файла.
+ * Помогает плеерам не трактовать материал как HDR после перекодирования (например с iPhone).
  */
-export const FFMPEG_HDR_TO_SDR_ZSCALE =
-  "zscale=transferin=arib-std-b67:transfer=bt709:primariesin=bt2020:primaries=bt709:matrixin=bt2020nc:matrix=bt709,format=yuv420p";
-
-/** Добавить HDR→SDR в начало цепочки фильтров (через запятую). */
-export function prependHdrToSdrToVideoFilterChain(rest: string): string {
-  return `${FFMPEG_HDR_TO_SDR_ZSCALE},${rest}`;
-}
+export const FFMPEG_OUTPUT_COLOR_TAGS_BT709: readonly string[] = [
+  "-colorspace",
+  "bt709",
+  "-color_trc",
+  "bt709",
+  "-color_primaries",
+  "bt709",
+];
 
 export async function ffprobeDuration(filePath: string, log: Logger): Promise<number> {
   const ffprobeBin = getFfprobeBinary();

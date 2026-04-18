@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createLogger } from "@/lib/logger";
-import { FFMPEG_HDR_TO_SDR_ZSCALE, ffprobeDuration, runFfmpeg } from "@/lib/ffmpeg/exec";
+import { FFMPEG_OUTPUT_COLOR_TAGS_BT709, ffprobeDuration, runFfmpeg } from "@/lib/ffmpeg/exec";
 import { jobOutputDir } from "@/lib/paths";
 
 const log = createLogger("add_audio");
@@ -29,8 +29,6 @@ export async function addAudio(
         videoPath,
         "-i",
         audioPath,
-        "-vf",
-        FFMPEG_HDR_TO_SDR_ZSCALE,
         "-map",
         "0:v:0",
         "-map",
@@ -48,6 +46,7 @@ export async function addAudio(
         "-b:a",
         "192k",
         "-shortest",
+        ...FFMPEG_OUTPUT_COLOR_TAGS_BT709,
         outPath,
       ],
       log,
@@ -60,8 +59,6 @@ export async function addAudio(
         videoPath,
         "-i",
         audioPath,
-        "-vf",
-        FFMPEG_HDR_TO_SDR_ZSCALE,
         "-map",
         "0:v:0",
         "-map",
@@ -79,6 +76,7 @@ export async function addAudio(
         "-b:a",
         "192k",
         "-shortest",
+        ...FFMPEG_OUTPUT_COLOR_TAGS_BT709,
         outPath,
       ],
       log,

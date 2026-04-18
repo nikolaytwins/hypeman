@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createLogger } from "@/lib/logger";
-import { FFMPEG_HDR_TO_SDR_ZSCALE, runFfmpeg } from "@/lib/ffmpeg/exec";
+import { FFMPEG_OUTPUT_COLOR_TAGS_BT709, runFfmpeg } from "@/lib/ffmpeg/exec";
 import { jobOutputDir, jobScenesDir } from "@/lib/paths";
 
 const log = createLogger("merge_videos");
@@ -49,6 +49,7 @@ async function normalizeScene(
         "20",
         "-pix_fmt",
         "yuv420p",
+        ...FFMPEG_OUTPUT_COLOR_TAGS_BT709,
         outputPath,
       ],
       log,
@@ -57,14 +58,13 @@ async function normalizeScene(
     return;
   }
 
-  const vfVideo = [FFMPEG_HDR_TO_SDR_ZSCALE, scalePad].join(",");
   await runFfmpeg(
     [
       "-i",
       inputPath,
       "-an",
       "-vf",
-      vfVideo,
+      scalePad,
       "-c:v",
       "libx264",
       "-preset",
@@ -73,6 +73,7 @@ async function normalizeScene(
       "20",
       "-pix_fmt",
       "yuv420p",
+      ...FFMPEG_OUTPUT_COLOR_TAGS_BT709,
       outputPath,
     ],
     log,
@@ -126,6 +127,7 @@ export async function mergeVideos(
       "-pix_fmt",
       "yuv420p",
       "-an",
+      ...FFMPEG_OUTPUT_COLOR_TAGS_BT709,
       mergedPath,
     ],
     log,
