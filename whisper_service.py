@@ -4,7 +4,7 @@ from pydantic import BaseModel
 import uvicorn
 
 app = FastAPI()
-model = WhisperModel("large-v3", device="cpu", compute_type="int8")
+model = WhisperModel("small", device="cpu", compute_type="int8")
 
 
 class TranscribeRequest(BaseModel):
