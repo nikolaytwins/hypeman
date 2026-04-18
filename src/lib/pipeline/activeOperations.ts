@@ -16,6 +16,7 @@ export const PIPELINE_STEP_LABEL_RU: Record<string, string> = {
   "add-audio": "Наложение озвучки (ffmpeg)",
   "burn-subtitles": "Прожиг субтитров (ffmpeg)",
   "generate-subtitles": "Речь → субтитры SRT",
+  "save-captions": "Сохранение правок SRT",
   "generate-voice": "Озвучка ElevenLabs",
   transcribe: "Расшифровка в текст",
   "generate-script": "Сценарий (ИИ)",

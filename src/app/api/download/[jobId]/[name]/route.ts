@@ -6,7 +6,13 @@ import { jobAudioDir, jobOutputDir } from "@/lib/paths";
 
 export const runtime = "nodejs";
 
-const ALLOWED = new Set(["final.mp4", "with_audio.mp4", "captions.srt", "voice.mp3"]);
+const ALLOWED = new Set([
+  "final.mp4",
+  "with_audio.mp4",
+  "normalized.mp4",
+  "captions.srt",
+  "voice.mp3",
+]);
 
 export async function GET(
   _req: Request,

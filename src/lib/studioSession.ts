@@ -11,9 +11,11 @@ export type Screen =
   | "adapt_rewrite"
   | "subs_upload"
   | "subs_burn"
+  | "subs_review"
   | "voice"
   | "scenes"
   | "render"
+  | "render_review"
   | "done";
 
 export const STUDIO_DRAFT_KEY = "hypeman-studio-draft-v1";
@@ -30,9 +32,11 @@ const ALL_SCREENS: Screen[] = [
   "adapt_rewrite",
   "subs_upload",
   "subs_burn",
+  "subs_review",
   "voice",
   "scenes",
   "render",
+  "render_review",
   "done",
 ];
 
@@ -144,9 +148,11 @@ export function draftHasWork(d: Partial<StudioDraftV1>): boolean {
     screen === "adapt_rewrite" ||
     screen === "subs_upload" ||
     screen === "subs_burn" ||
+    screen === "subs_review" ||
     screen === "voice" ||
     screen === "scenes" ||
-    screen === "render";
+    screen === "render" ||
+    screen === "render_review";
   return (
     midFlow ||
     screen === "done" ||
@@ -225,14 +231,17 @@ export function snapshotFromDraft(d: Partial<StudioDraftV1>): StudioStateSnapsho
   if (
     !script &&
     d.origin !== "subs" &&
-    (screen === "voice" || screen === "scenes" || screen === "render")
+    (screen === "voice" || screen === "scenes" || screen === "render" || screen === "render_review")
   ) {
     screen = "pick";
   }
   if (!script && screen === "new_script") {
     if (d.origin === "adapt") screen = "adapt_rewrite";
-    else if (d.origin === "subs") screen = d.sourceReady ? "subs_burn" : "subs_upload";
-    else screen = d.topic?.trim() ? "new_topic" : "pick";
+    else if (d.origin === "subs") {
+      if (!d.sourceReady) screen = "subs_upload";
+      else if (d.screen === "subs_review") screen = "subs_review";
+      else screen = "subs_burn";
+    } else screen = d.topic?.trim() ? "new_topic" : "pick";
   }
   return {
     jobId: d.jobId,

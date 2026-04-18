@@ -19,7 +19,7 @@ export async function burnSubtitles(
   const fn = sanitizeFontName(fontname);
   const fd = fontsdir ? escapeForSubtitlesFilter(path.resolve(fontsdir)) : "";
   const style = [
-    "FontSize=15",
+    "FontSize=13",
     `FontName=${fn}`,
     "PrimaryColour=&H00FFFFFF",
     "OutlineColour=&H80000000",
@@ -27,7 +27,9 @@ export async function burnSubtitles(
     "Outline=1",
     "Shadow=0",
     "Alignment=2",
-    "MarginV=46",
+    "MarginL=56",
+    "MarginR=56",
+    "MarginV=48",
     "Bold=1",
   ].join(",");
   const vf =

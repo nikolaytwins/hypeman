@@ -99,7 +99,9 @@ const STAGE_ETA_BASE_SEC: Record<Screen, number> = {
   adapt_transcribe: 120,
   adapt_rewrite: 45,
   subs_upload: 20,
-  subs_burn: 150,
+  subs_burn: 120,
+  subs_review: 40,
+  render_review: 40,
   voice: 90,
   scenes: 35,
   render: 200,
@@ -120,9 +122,18 @@ function reelRoughEta(r: ReelListItem): string {
     const left = Math.max(25, base * (1 - r.renderProgress / 100));
     return formatRoughEta(left);
   }
-  if (sc === "subs_burn" && typeof r.renderProgress === "number" && r.renderProgress > 0) {
-    const base = STAGE_ETA_BASE_SEC.subs_burn;
-    const left = Math.max(20, base * (1 - r.renderProgress / 100));
+  if (
+    (sc === "subs_burn" || sc === "subs_review") &&
+    typeof r.renderProgress === "number" &&
+    r.renderProgress > 0
+  ) {
+    const base = STAGE_ETA_BASE_SEC[sc === "subs_review" ? "subs_review" : "subs_burn"];
+    const left = Math.max(15, base * (1 - r.renderProgress / 100));
+    return formatRoughEta(left);
+  }
+  if (sc === "render_review" && typeof r.renderProgress === "number" && r.renderProgress > 0) {
+    const base = STAGE_ETA_BASE_SEC.render_review;
+    const left = Math.max(15, base * (1 - r.renderProgress / 100));
     return formatRoughEta(left);
   }
   return formatRoughEta(STAGE_ETA_BASE_SEC[sc] ?? 45);
@@ -167,6 +178,8 @@ export function StudioApp() {
   const [errOpen, setErrOpen] = useState(false);
   const [errMsg, setErrMsg] = useState("");
   const [renderProgress, setRenderProgress] = useState(0);
+  /** Текст captions.srt перед прожигом (правка вручную). */
+  const [captionsEditor, setCaptionsEditor] = useState("");
   /** Пока false — не пишем в sessionStorage, чтобы не затереть черновик до восстановления. */
   const [studioHydrated, setStudioHydrated] = useState(false);
   const scenesInputRef = useRef<HTMLInputElement>(null);
@@ -336,6 +349,24 @@ export function StudioApp() {
   }, [screen]);
 
   useEffect(() => {
+    if (screen !== "subs_review" && screen !== "render_review") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/download/${encodeURIComponent(jobId)}/captions.srt`);
+        if (!res.ok) return;
+        const text = await res.text();
+        if (!cancelled) setCaptionsEditor(text);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [screen, jobId]);
+
+  useEffect(() => {
     if (!studioHydrated) return;
     if (screen === "done") {
       clearStudioDraft();
@@ -407,6 +438,7 @@ export function StudioApp() {
     setSourceReady(false);
     setLogs([]);
     setRenderProgress(0);
+    setCaptionsEditor("");
     setServerPipelineBannerError(null);
     pushLog("Новая задача");
   };
@@ -431,6 +463,9 @@ export function StudioApp() {
       case "subs_burn":
         setScreen("subs_upload");
         break;
+      case "subs_review":
+        setScreen("subs_burn");
+        break;
       case "adapt_transcribe":
         setScreen("adapt_upload");
         break;
@@ -446,6 +481,9 @@ export function StudioApp() {
       case "render":
         setScreen("scenes");
         break;
+      case "render_review":
+        setScreen("render");
+        break;
       case "done":
         setRenderProgress(0);
         setScreen(origin === "subs" ? "subs_burn" : "render");
@@ -459,7 +497,9 @@ export function StudioApp() {
     screen !== "pick" &&
     screen !== "done" &&
     !(screen === "render" && renderProgress > 0 && busy) &&
-    !(screen === "subs_burn" && renderProgress > 0 && busy);
+    !(screen === "render_review" && !!busy) &&
+    !(screen === "subs_burn" && renderProgress > 0 && busy) &&
+    !(screen === "subs_review" && !!busy);
 
   const stepProgress = useMemo(() => {
     if (screen === "new_script" && origin === "adapt") return 40;
@@ -471,10 +511,12 @@ export function StudioApp() {
       adapt_transcribe: 22,
       adapt_rewrite: 32,
       subs_upload: 14,
-      subs_burn: 88,
+      subs_burn: 72,
+      subs_review: 90,
       voice: 50,
       scenes: 72,
-      render: 88,
+      render: 80,
+      render_review: 92,
       done: 100,
     };
     return map[screen] ?? 0;
@@ -621,52 +663,50 @@ export function StudioApp() {
     setBusy("Сборка");
     setRenderProgress(5);
     const steps = [
-      { pct: 25, fn: async () => {
-        const res = await fetch("/api/merge-videos", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            jobId,
-            sceneFileNames,
-            sceneDurationsSec: script?.scenes.map((s) => s.durationHintSec),
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
-        pushLog("Сцены склеены");
-      }},
-      { pct: 50, fn: async () => {
-        const res = await fetch("/api/add-audio", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobId }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
-        pushLog("Озвучка наложена");
-      }},
-      { pct: 75, fn: async () => {
-        pushLog("Субтитры: распознавание речи → captions.srt (часто 30 с — несколько минут)…");
-        const res = await fetch("/api/generate-subtitles", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobId }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
-        pushLog("Субтитры SRT готовы");
-      }},
-      { pct: 100, fn: async () => {
-        pushLog("ffmpeg: прожиг субтитров в видео (время ≈ длина ролика)…");
-        const res = await fetch("/api/burn-subtitles", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobId }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
-        pushLog("Финальный MP4 готов");
-      }},
+      {
+        pct: 33,
+        fn: async () => {
+          const res = await fetch("/api/merge-videos", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jobId,
+              sceneFileNames,
+              sceneDurationsSec: script?.scenes.map((s) => s.durationHintSec),
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
+          pushLog("Сцены склеены");
+        },
+      },
+      {
+        pct: 66,
+        fn: async () => {
+          const res = await fetch("/api/add-audio", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobId }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
+          pushLog("Озвучка наложена");
+        },
+      },
+      {
+        pct: 100,
+        fn: async () => {
+          pushLog("Субтитры: распознавание речи → captions.srt (часто 30 с — несколько минут)…");
+          const res = await fetch("/api/generate-subtitles", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobId }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
+          pushLog("Субтитры SRT готовы — проверьте текст и прожгите в кадр");
+        },
+      },
     ];
     try {
       setServerPipelineBannerError(null);
@@ -675,7 +715,8 @@ export function StudioApp() {
         await s.fn();
         setRenderProgress(s.pct);
       }
-      setScreen("done");
+      setRenderProgress(0);
+      setScreen("render_review");
     } catch (e) {
       setServerPipelineBannerError(pipelineErrorMessage(e));
       fail(e);
@@ -684,65 +725,105 @@ export function StudioApp() {
     }
   };
 
-  const runSubsOnlyPipeline = async () => {
-    setBusy("Субтитры");
-    setRenderProgress(8);
-    const steps = [
-      {
-        pct: 30,
-        fn: async () => {
-          const res = await fetch("/api/extract-audio", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jobId }),
-          });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
-          pushLog("Аудио извлечено (extracted.mp3)");
-        },
-      },
-      {
-        pct: 65,
-        fn: async () => {
-          pushLog("Шаг 2/3: распознавание речи → captions.srt (часто 30 с — несколько минут)…");
-          const res = await fetch("/api/generate-subtitles", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jobId, audioFileName: "extracted.mp3" }),
-          });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
-          pushLog("SRT по дорожке видео готов");
-        },
-      },
-      {
-        pct: 100,
-        fn: async () => {
-          pushLog("Шаг 3/3: ffmpeg — прожиг субтитров (время обычно сопоставимо с длиной ролика)…");
-          const res = await fetch("/api/burn-subtitles", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jobId, videoSource: "input" }),
-          });
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
-          pushLog("Субтитры прожжены в исходное видео → final.mp4");
-        },
-      },
-    ];
+  const runRenderBurn = async () => {
+    setBusy("Прожиг");
+    setRenderProgress(10);
     try {
       setServerPipelineBannerError(null);
-      pushLog("Режим: только субтитры на исходный ролик…");
-      for (const s of steps) {
-        await s.fn();
-        setRenderProgress(s.pct);
-      }
+      pushLog("Сохраняем правки SRT…");
+      const save = await fetch("/api/save-captions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId, srt: captionsEditor }),
+      });
+      const saveData = await save.json();
+      if (!save.ok) throw new Error(saveData.error ?? ERR_REQUEST);
+      setRenderProgress(40);
+      pushLog("ffmpeg: прожиг субтитров в видео (время ≈ длина ролика)…");
+      const res = await fetch("/api/burn-subtitles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
+      setRenderProgress(100);
+      pushLog("Финальный MP4 готов");
       setScreen("done");
     } catch (e) {
       setServerPipelineBannerError(pipelineErrorMessage(e));
       fail(e);
     } finally {
       setBusy(null);
+      setRenderProgress(0);
+    }
+  };
+
+  const runSubsRecognizeOnly = async () => {
+    setBusy("Субтитры");
+    setRenderProgress(8);
+    try {
+      setServerPipelineBannerError(null);
+      pushLog("Режим: только субтитры на исходный ролик…");
+      const r1 = await fetch("/api/extract-audio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId }),
+      });
+      const d1 = await r1.json();
+      if (!r1.ok) throw new Error(d1.error ?? ERR_REQUEST);
+      pushLog("Аудио извлечено (extracted.mp3)");
+      setRenderProgress(45);
+      pushLog("Распознавание речи → captions.srt (часто 30 с — несколько минут)…");
+      const r2 = await fetch("/api/generate-subtitles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId, audioFileName: "extracted.mp3" }),
+      });
+      const d2 = await r2.json();
+      if (!r2.ok) throw new Error(d2.error ?? ERR_REQUEST);
+      pushLog("SRT готов — проверьте текст и прожгите в кадр");
+      setRenderProgress(0);
+      setScreen("subs_review");
+    } catch (e) {
+      setServerPipelineBannerError(pipelineErrorMessage(e));
+      fail(e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runSubsBurnFromReview = async () => {
+    setBusy("Прожиг");
+    setRenderProgress(12);
+    try {
+      setServerPipelineBannerError(null);
+      pushLog("Сохраняем правки SRT…");
+      const save = await fetch("/api/save-captions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId, srt: captionsEditor }),
+      });
+      const saveData = await save.json();
+      if (!save.ok) throw new Error(saveData.error ?? ERR_REQUEST);
+      setRenderProgress(50);
+      pushLog("ffmpeg: прожиг субтитров в исходное видео…");
+      const res = await fetch("/api/burn-subtitles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId, videoSource: "input" }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? ERR_REQUEST);
+      pushLog("Субтитры прожжены → final.mp4");
+      setRenderProgress(100);
+      setScreen("done");
+    } catch (e) {
+      setServerPipelineBannerError(pipelineErrorMessage(e));
+      fail(e);
+    } finally {
+      setBusy(null);
+      setRenderProgress(0);
     }
   };
 
@@ -784,9 +865,11 @@ export function StudioApp() {
     adapt_rewrite: "Адаптация",
     subs_upload: "Видео для субтитров",
     subs_burn: "Субтитры",
+    subs_review: "Правка субтитров",
     voice: "Озвучка",
     scenes: "Видеосцены",
     render: "Сборка",
+    render_review: "Правка субтитров",
     done: "Готово",
   };
 
@@ -1304,17 +1387,60 @@ export function StudioApp() {
                   <CardHeader>
                     <StepHeader
                       icon={Subtitles}
-                      title="Шаг 2 · Прожиг"
-                      description="Извлечение аудио → Whisper / синхронный SRT → наложение на ваш файл. Результат: final.mp4 в этой задаче."
+                      title="Шаг 2 · Распознавание"
+                      description="Извлечение аудио и Whisper / SRT. Дальше вы сможете поправить текст и только затем прожечь субтитры в кадр."
                     />
                   </CardHeader>
                   <CardContent className="space-y-5">
                     {renderProgress > 0 && renderProgress < 100 ? (
                       <Progress value={renderProgress} />
                     ) : null}
-                    <Button variant="gloss" className="w-full" disabled={!sourceReady || !!busy} onClick={runSubsOnlyPipeline}>
+                    <Button
+                      variant="gloss"
+                      className="w-full"
+                      disabled={!sourceReady || !!busy}
+                      onClick={runSubsRecognizeOnly}
+                    >
                       {busy ? <Loader2 className="animate-spin" /> : <Subtitles className="h-4 w-4" />}
-                      Сделать субтитры и сохранить
+                      Распознать речь и открыть правку
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : null}
+
+              {screen === "subs_review" ? (
+                <Card>
+                  <CardHeader>
+                    <StepHeader
+                      icon={PenLine}
+                      title="Шаг 3 · Правка и прожиг"
+                      description="Сверьте звук с текстом, исправьте опечатки в SRT, затем сохраните в final.mp4."
+                    />
+                  </CardHeader>
+                  <CardContent className="space-y-5">
+                    <div className="space-y-2">
+                      <Label className="text-slate-600">Превью (SDR, как пойдёт в прожиг)</Label>
+                      <video
+                        key={`${jobId}-norm`}
+                        controls
+                        playsInline
+                        className="aspect-video w-full rounded-xl border border-slate-200 bg-black object-contain"
+                        src={`/api/download/${encodeURIComponent(jobId)}/normalized.mp4`}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="subs-srt">Субтитры (SRT)</Label>
+                      <Textarea
+                        id="subs-srt"
+                        value={captionsEditor}
+                        onChange={(e) => setCaptionsEditor(e.target.value)}
+                        className="min-h-[220px] font-mono text-xs leading-relaxed"
+                        spellCheck={false}
+                      />
+                    </div>
+                    <Button variant="gloss" className="w-full" disabled={!!busy} onClick={runSubsBurnFromReview}>
+                      {busy ? <Loader2 className="animate-spin" /> : <Film className="h-4 w-4" />}
+                      Сохранить правки и прожечь в видео
                     </Button>
                   </CardContent>
                 </Card>
@@ -1450,15 +1576,53 @@ export function StudioApp() {
                   <CardHeader>
                     <StepHeader
                       icon={Combine}
-                      title={`${origin === "adapt" ? "Шаг 7" : "Шаг 5"} · Финал`}
-                      description="Склейка, озвучка, субтитры и прожиг — одной кнопкой."
+                      title={`${origin === "adapt" ? "Шаг 7" : "Шаг 5"} · Сборка и субтитры`}
+                      description="Склейка сцен, озвучка и распознавание речи в SRT. Прожиг в кадр — на следующем шаге после вашей правки."
                     />
                   </CardHeader>
                   <CardContent className="space-y-5">
                     {renderProgress > 0 && renderProgress < 100 ? <Progress value={renderProgress} /> : null}
                     <Button variant="gloss" className="w-full" disabled={!!busy} onClick={runAssemble}>
                       {busy ? <Loader2 className="animate-spin" /> : <Subtitles className="h-4 w-4" />}
-                      Собрать final.mp4
+                      Склеить, озвучить и сделать субтитры
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : null}
+
+              {screen === "render_review" ? (
+                <Card>
+                  <CardHeader>
+                    <StepHeader
+                      icon={PenLine}
+                      title={`${origin === "adapt" ? "Шаг 8" : "Шаг 6"} · Правка и финал`}
+                      description="Клип со звуком ниже — проверьте субтитры по слуху, поправьте SRT и прожгите в кадр."
+                    />
+                  </CardHeader>
+                  <CardContent className="space-y-5">
+                    <div className="space-y-2">
+                      <Label className="text-slate-600">Превью (со звуком)</Label>
+                      <video
+                        key={`${jobId}-wa`}
+                        controls
+                        playsInline
+                        className="aspect-video w-full rounded-xl border border-slate-200 bg-black object-contain"
+                        src={`/api/download/${encodeURIComponent(jobId)}/with_audio.mp4`}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="render-srt">Субтитры (SRT)</Label>
+                      <Textarea
+                        id="render-srt"
+                        value={captionsEditor}
+                        onChange={(e) => setCaptionsEditor(e.target.value)}
+                        className="min-h-[220px] font-mono text-xs leading-relaxed"
+                        spellCheck={false}
+                      />
+                    </div>
+                    <Button variant="gloss" className="w-full" disabled={!!busy} onClick={runRenderBurn}>
+                      {busy ? <Loader2 className="animate-spin" /> : <Film className="h-4 w-4" />}
+                      Сохранить правки и собрать final.mp4
                     </Button>
                   </CardContent>
                 </Card>
