@@ -1,30 +1,15 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { createLogger } from "@/lib/logger";
-import { ensureJobDirs, ensureStorageDirs, jobInputDir, jobOutputDir } from "@/lib/paths";
+import { ensureJobDirs, ensureStorageDirs, jobOutputDir } from "@/lib/paths";
 import { withActiveTracking } from "@/lib/pipeline/activeOperations";
 import { burnSubtitles } from "@/lib/pipeline/burnSubtitles";
+import { ensureNormalizedInputVideo } from "@/lib/pipeline/normalizeInput";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
 const log = createLogger("api/burn-subtitles");
-
-async function firstInputVideoPath(jobId: string): Promise<string> {
-  const dir = jobInputDir(jobId);
-  let names: string[] = [];
-  try {
-    names = await fs.readdir(dir);
-  } catch {
-    throw new Error("Папка input пуста — загрузите видео");
-  }
-  const video = names.find((n) => /\.(mp4|mov|webm|mkv)$/i.test(n));
-  if (!video) {
-    throw new Error("В input/ нет видео (mp4, mov, webm, mkv)");
-  }
-  return path.join(dir, video);
-}
 
 export async function POST(req: Request) {
   try {
@@ -44,7 +29,7 @@ export async function POST(req: Request) {
       const videoPath =
         body.videoPath ??
         (body.videoSource === "input"
-          ? await firstInputVideoPath(body.jobId)
+          ? await ensureNormalizedInputVideo(body.jobId)
           : path.join(jobOutputDir(body.jobId), "with_audio.mp4"));
       const srtPath = body.srtPath ?? path.join(jobOutputDir(body.jobId), "captions.srt");
       const finalPath = await burnSubtitles(body.jobId, { videoPath, srtPath });

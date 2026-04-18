@@ -15,7 +15,9 @@ class TranscribeRequest(BaseModel):
 @app.post("/transcribe")
 def transcribe(req: TranscribeRequest):
     try:
-        segments, _ = model.transcribe(
+        print(f"[whisper] audio_path: {req.audio_path}")
+        print(f"[whisper] language: {req.language}")
+        segments, info = model.transcribe(
             req.audio_path,
             word_timestamps=True,
             language=req.language if req.language else None,
@@ -32,8 +34,13 @@ def transcribe(req: TranscribeRequest):
                             "end": round(word.end, 3),
                         }
                     )
+        print(f"[whisper] detected language: {info.language}, words count: {len(words)}")
+        if words:
+            print(f"[whisper] first 3 words: {words[:3]}")
+            print(f"[whisper] last 3 words: {words[-3:]}")
         return {"words": words}
     except Exception as e:
+        print(f"[whisper] ERROR: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
