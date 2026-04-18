@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createLogger } from "@/lib/logger";
-import { escapeForSubtitlesFilter, FFMPEG_OUTPUT_COLOR_TAGS_BT709, runFfmpeg } from "@/lib/ffmpeg/exec";
+import { escapeForSubtitlesFilter, runFfmpeg } from "@/lib/ffmpeg/exec";
 import { jobOutputDir, resolvedSubtitleFontSetup } from "@/lib/paths";
 
 const log = createLogger("burn_subtitles");
@@ -38,7 +38,21 @@ export async function burnSubtitles(
   log.info("subtitle_font", { fontname: fn, fontsdir: fd || null });
 
   await runFfmpeg(
-    ["-i", options.videoPath, "-vf", vf, "-c:a", "copy", ...FFMPEG_OUTPUT_COLOR_TAGS_BT709, outPath],
+    [
+      "-i",
+      options.videoPath,
+      "-vf",
+      vf,
+      "-c:v",
+      "libx264",
+      "-crf",
+      "0",
+      "-preset",
+      "ultrafast",
+      "-c:a",
+      "copy",
+      outPath,
+    ],
     log,
     { label: "burn_subtitles" },
   );

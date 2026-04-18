@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createLogger } from "@/lib/logger";
-import { FFMPEG_OUTPUT_COLOR_TAGS_BT709, ffprobeDuration, runFfmpeg } from "@/lib/ffmpeg/exec";
+import { ffprobeDuration, runFfmpeg } from "@/lib/ffmpeg/exec";
 import { jobOutputDir } from "@/lib/paths";
 
 const log = createLogger("add_audio");
@@ -34,19 +34,12 @@ export async function addAudio(
         "-map",
         "1:a:0",
         "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "20",
-        "-pix_fmt",
-        "yuv420p",
+        "copy",
         "-c:a",
         "aac",
         "-b:a",
         "192k",
         "-shortest",
-        ...FFMPEG_OUTPUT_COLOR_TAGS_BT709,
         outPath,
       ],
       log,
@@ -64,19 +57,12 @@ export async function addAudio(
         "-map",
         "1:a:0",
         "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "20",
-        "-pix_fmt",
-        "yuv420p",
+        "copy",
         "-c:a",
         "aac",
         "-b:a",
         "192k",
         "-shortest",
-        ...FFMPEG_OUTPUT_COLOR_TAGS_BT709,
         outPath,
       ],
       log,
